@@ -1,0 +1,101 @@
+mission:
+  # 是否使用起飞点作为相对坐标原点
+  use_relative: true
+
+  # 起飞高度，题目要求 150 ± 10 cm
+  takeoff_height: 1.50
+
+  # 到达航点的误差阈值
+  arrive_pos_eps: 0.15
+  arrive_z_eps: 0.10
+  arrive_yaw_eps_deg: 10.0
+
+  # P 控制参数
+  kp_xy: 0.45
+  kp_z: 0.45
+  kp_yaw: 0.60
+
+  # 速度限幅
+  max_vel_xy: 0.25
+  max_vel_z: 0.15
+  max_yaw_rate: 0.40
+
+  # 激光点在图像中的像素坐标
+  laser_u: 320
+  laser_v: 240
+
+  # 二维码中心与激光点的允许像素误差
+  align_pixel_eps: 25
+
+  # 视觉对准参数
+  align_kp_u: 0.0008
+  align_kp_v: 0.0008
+  max_align_vel_y: 0.10
+  max_align_vel_z: 0.08
+
+  # 超时与激光点亮时间
+  search_timeout: 3.0
+  align_timeout: 4.0
+  laser_flash_time: 0.5
+  ack_timeout: 0.4
+
+  # 降落点；相对起飞点，约对应题图右上角黑色圆形区域
+  land:
+    x: 3.25
+    y: 2.25
+    z: 0.5
+    yaw: 0.0
+
+  # type=safe 表示安全过渡点；type=scan 表示盘点点
+  # yaw=0.0 面向赛场 +X；yaw=3.1416 面向赛场 -X
+  points:
+    # 起飞后进入左货架下方安全通道
+    - {type: safe, x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
+    - {type: safe, x: 0.30, y: 0.25, z: 1.50, yaw: 0.0}
+
+    # A 面：左货架左侧
+    - {type: scan, face: A, slot: 1, x: 0.30, y: 0.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 2, x: 0.30, y: 1.25, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 3, x: 0.30, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 6, x: 0.30, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 5, x: 0.30, y: 1.25, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 4, x: 0.30, y: 0.75, z: 1.00, yaw: 0.0}
+
+    # A 面到 B 面绕行
+    - {type: safe, x: 0.30, y: 0.25, z: 1.30, yaw: 0.0}
+    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 3.1416}
+
+    # B 面：左货架右侧
+    - {type: scan, face: B, slot: 4, x: 1.20, y: 0.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 5, x: 1.20, y: 1.25, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 6, x: 1.20, y: 1.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 3, x: 1.20, y: 1.75, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: B, slot: 2, x: 1.20, y: 1.25, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: B, slot: 1, x: 1.20, y: 0.75, z: 1.40, yaw: 3.1416}
+
+    # B 面到 C 面过渡
+    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 0.0}
+    - {type: safe, x: 2.30, y: 0.25, z: 1.30, yaw: 0.0}
+
+    # C 面：右货架左侧
+    - {type: scan, face: C, slot: 1, x: 2.30, y: 0.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 2, x: 2.30, y: 1.25, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 3, x: 2.30, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 6, x: 2.30, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 5, x: 2.30, y: 1.25, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 4, x: 2.30, y: 0.75, z: 1.00, yaw: 0.0}
+
+    # C 面到 D 面绕行
+    - {type: safe, x: 2.30, y: 0.25, z: 1.30, yaw: 0.0}
+    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 3.1416}
+
+    # D 面：右货架右侧
+    - {type: scan, face: D, slot: 4, x: 3.20, y: 0.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 5, x: 3.20, y: 1.25, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 6, x: 3.20, y: 1.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 3, x: 3.20, y: 1.75, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: D, slot: 2, x: 3.20, y: 1.25, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: D, slot: 1, x: 3.20, y: 0.75, z: 1.40, yaw: 3.1416}
+
+    # 盘点结束后回到右货架下方安全通道
+    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 0.0}
