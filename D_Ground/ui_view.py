@@ -95,15 +95,30 @@ class GroundStationUI(QMainWindow):
 
         left_panel = self.build_left_panel()
         right_panel = self.build_right_panel()
-        bottom_panel = self.build_bottom_panel()
 
-        main_layout.addWidget(left_panel, 5)
-        main_layout.addWidget(right_panel, 2)
+        main_layout.addWidget(left_panel, 60)
+        main_layout.addWidget(right_panel, 40)
 
         root_layout.addLayout(main_layout, 1)
-        root_layout.addWidget(bottom_panel, 0)
 
         self.setCentralWidget(root)
+
+    def build_title_bar(self):
+        panel = QFrame()
+        panel.setStyleSheet(self.style_panel())
+        panel.setFixedHeight(36)
+
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(10, 0, 10, 0)
+
+        title = QLabel("立体货架盘点无人机地面站")
+        title.setFont(QFont("Microsoft YaHei UI", 16, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("border: none; color: #1565C0;")
+
+        layout.addWidget(title)
+
+        return panel
 
     # ==================================================
     # 左侧：货架表格
@@ -114,11 +129,11 @@ class GroundStationUI(QMainWindow):
         panel.setStyleSheet(self.style_panel())
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
         title = QLabel("货架盘点结果")
-        title.setFont(QFont("Microsoft YaHei UI", 22, QFont.Bold))
+        title.setFont(QFont("Microsoft YaHei UI", 20, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             QLabel {
@@ -132,9 +147,10 @@ class GroundStationUI(QMainWindow):
 
         table_layout = QGridLayout()
         table_layout.setSpacing(6)
+        table_layout.setContentsMargins(0, 0, 0, 0)
 
         blank = QLabel("")
-        blank.setFixedWidth(44)
+        blank.setFixedWidth(36)
         blank.setStyleSheet("border: none;")
         table_layout.addWidget(blank, 0, 0)
 
@@ -143,7 +159,7 @@ class GroundStationUI(QMainWindow):
             label = QLabel(str(col))
             label.setFont(QFont("Microsoft YaHei UI", 18, QFont.Bold))
             label.setAlignment(Qt.AlignCenter)
-            label.setFixedHeight(44)
+            label.setFixedHeight(34)
             label.setStyleSheet(self.style_col_header())
             table_layout.addWidget(label, 0, col)
 
@@ -154,7 +170,7 @@ class GroundStationUI(QMainWindow):
             row_label = QLabel(row_name)
             row_label.setFont(QFont("Microsoft YaHei UI", 18, QFont.Bold))
             row_label.setAlignment(Qt.AlignCenter)
-            row_label.setFixedWidth(44)
+            row_label.setFixedWidth(34)
             row_label.setStyleSheet(self.style_row_header())
             table_layout.addWidget(row_label, row_index, 0)
 
@@ -165,8 +181,8 @@ class GroundStationUI(QMainWindow):
 
                 btn = QPushButton(f"{coord}\n--")
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                btn.setMinimumHeight(92)
-                btn.setFont(QFont("Consolas", 20, QFont.Bold))
+                btn.setMinimumHeight(68)
+                btn.setFont(QFont("Microsoft YaHei UI", 16, QFont.Bold))
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.setStyleSheet(self.style_cell_empty())
 
@@ -179,7 +195,15 @@ class GroundStationUI(QMainWindow):
         for c in range(7):
             table_layout.setColumnStretch(c, 1)
 
-        layout.addLayout(table_layout, 1)
+        table_container = QWidget()
+        table_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        table_container_layout = QVBoxLayout(table_container)
+        table_container_layout.setContentsMargins(0, 0, 0, 0)
+        table_container_layout.addLayout(table_layout)
+
+        layout.addWidget(table_container)
+        layout.addWidget(self.build_status_panel())
+        layout.addWidget(self.build_log_panel(), 1)
 
         return panel
 
@@ -195,11 +219,11 @@ class GroundStationUI(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        layout.addWidget(self.build_network_panel())
+        self.network_panel = self.build_network_panel()
+        layout.addWidget(self.network_panel)
         layout.addWidget(self.build_query_panel())
-        layout.addWidget(self.build_node_panel())
-        layout.addWidget(self.build_status_panel())
-        layout.addWidget(self.build_log_panel(), 1)
+        layout.addStretch(1)
+        layout.addWidget(self.build_bottom_panel())
 
         return panel
 
@@ -210,49 +234,51 @@ class GroundStationUI(QMainWindow):
     def build_network_panel(self):
         panel = QFrame()
         panel.setStyleSheet(self.style_sub_panel())
+        panel.setFixedHeight(132)
 
         layout = QGridLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title = QLabel("网络配置")
-        title.setFont(QFont("Microsoft YaHei UI", 11, QFont.Bold))
-        title.setStyleSheet("border: none; color: #37474F;")
-        layout.addWidget(title, 0, 0, 1, 4)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(6)
 
         self.recv_port_input = QLineEdit("8888")
         self.ip_input = QLineEdit("192.168.1.100")
         self.send_port_input = QLineEdit("8889")
 
         for edit in [self.recv_port_input, self.ip_input, self.send_port_input]:
-            edit.setFixedHeight(30)
-            edit.setFont(QFont("Consolas", 10))
+            edit.setFixedHeight(26)
+            edit.setFont(QFont("Consolas", 9))
             edit.setStyleSheet(self.style_line_edit())
 
-        label_recv = QLabel("收:")
-        label_ip = QLabel("IP:")
-        label_send = QLabel("发:")
+        label_recv = QLabel("收：")
+        label_ip = QLabel("IP：")
+        label_send = QLabel("发：")
 
         for label in [label_recv, label_ip, label_send]:
             label.setFont(QFont("Microsoft YaHei UI", 9))
             label.setStyleSheet("border: none;")
 
-        layout.addWidget(label_recv, 1, 0)
-        layout.addWidget(self.recv_port_input, 1, 1)
+        input_width = 160
+        self.recv_port_input.setFixedWidth(input_width)
+        self.ip_input.setFixedWidth(input_width)
+        self.send_port_input.setFixedWidth(input_width)
 
-        layout.addWidget(label_send, 1, 2)
-        layout.addWidget(self.send_port_input, 1, 3)
-
-        layout.addWidget(label_ip, 2, 0)
-        layout.addWidget(self.ip_input, 2, 1, 1, 3)
-
-        self.apply_network_btn = QPushButton("应用网络配置")
-        self.apply_network_btn.setFixedHeight(32)
-        self.apply_network_btn.setFont(QFont("Microsoft YaHei UI", 10, QFont.Bold))
+        self.apply_network_btn = QPushButton("应用")
+        self.apply_network_btn.setFixedHeight(28)
+        self.apply_network_btn.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
         self.apply_network_btn.setStyleSheet(self.style_small_blue_button())
         self.apply_network_btn.clicked.connect(self.on_apply_network_clicked)
 
-        layout.addWidget(self.apply_network_btn, 3, 0, 1, 4)
+        layout.addWidget(label_recv, 0, 0)
+        layout.addWidget(self.recv_port_input, 0, 1, alignment=Qt.AlignLeft)
+        layout.addWidget(label_ip, 1, 0)
+        layout.addWidget(self.ip_input, 1, 1, alignment=Qt.AlignLeft)
+        layout.addWidget(label_send, 2, 0)
+        layout.addWidget(self.send_port_input, 2, 1, alignment=Qt.AlignLeft)
+        layout.addWidget(self.apply_network_btn, 3, 0, 1, 2)
+
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 0)
 
         return panel
 
@@ -290,6 +316,7 @@ class GroundStationUI(QMainWindow):
     def build_query_panel(self):
         panel = QFrame()
         panel.setStyleSheet(self.style_sub_panel())
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -304,8 +331,8 @@ class GroundStationUI(QMainWindow):
         self.query_input = QLineEdit()
         self.query_input.setReadOnly(True)
         self.query_input.setAlignment(Qt.AlignCenter)
-        self.query_input.setFont(QFont("Consolas", 22, QFont.Bold))
-        self.query_input.setFixedHeight(44)
+        self.query_input.setFont(QFont("Consolas", 16, QFont.Bold))
+        self.query_input.setFixedHeight(30)
         self.query_input.setStyleSheet("""
             QLineEdit {
                 background-color: white;
@@ -332,8 +359,8 @@ class GroundStationUI(QMainWindow):
             col = index % 3
 
             btn = QPushButton(key)
-            btn.setFixedHeight(42)
-            btn.setFont(QFont("Microsoft YaHei UI", 13, QFont.Bold))
+            btn.setFixedHeight(30)
+            btn.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
             btn.clicked.connect(lambda checked=False, k=key: self.handle_keypad(k))
 
             if key == "enter":
@@ -348,10 +375,10 @@ class GroundStationUI(QMainWindow):
         layout.addLayout(keypad_layout)
 
         self.query_output = QLabel("查询结果显示区")
-        self.query_output.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
+        self.query_output.setFont(QFont("Microsoft YaHei UI", 11, QFont.Bold))
         self.query_output.setAlignment(Qt.AlignCenter)
         self.query_output.setWordWrap(True)
-        self.query_output.setMinimumHeight(44)
+        self.query_output.setFixedHeight(46)
         self.query_output.setStyleSheet("""
             QLabel {
                 background-color: #263238;
@@ -364,10 +391,10 @@ class GroundStationUI(QMainWindow):
         layout.addWidget(self.query_output)
 
         self.target_info = QLabel("目标信息：暂无")
-        self.target_info.setFont(QFont("Microsoft YaHei UI", 10, QFont.Bold))
+        self.target_info.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
         self.target_info.setAlignment(Qt.AlignCenter)
         self.target_info.setWordWrap(True)
-        self.target_info.setMinimumHeight(36)
+        self.target_info.setFixedHeight(40)
         self.target_info.setStyleSheet("""
             QLabel {
                 background-color: #FFF8E1;
@@ -404,30 +431,7 @@ class GroundStationUI(QMainWindow):
     # ==================================================
 
     def build_node_panel(self):
-        panel = QFrame()
-        panel.setStyleSheet(self.style_sub_panel())
-
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title = QLabel("节点状态")
-        title.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("border: none; color: #37474F;")
-
-        layout.addWidget(title)
-
-        node_layout = QGridLayout()
-        node_layout.setSpacing(6)
-
-        self.add_node_indicator(node_layout, "视觉", "VISION", 0, 0)
-        self.add_node_indicator(node_layout, "通信", "RECEIVER", 0, 1)
-        self.add_node_indicator(node_layout, "飞控", "FSM", 0, 2)
-
-        layout.addLayout(node_layout)
-
-        return panel
+        return self.build_status_panel()
 
     def add_node_indicator(self, layout, label_text: str, key: str, row: int, col: int):
         item = QFrame()
@@ -435,11 +439,11 @@ class GroundStationUI(QMainWindow):
 
         vbox = QVBoxLayout(item)
         vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(2)
+        vbox.setSpacing(1)
 
         light = QLabel("●")
         light.setAlignment(Qt.AlignCenter)
-        light.setFont(QFont("Arial", 24, QFont.Bold))
+        light.setFont(QFont("Arial", 18, QFont.Bold))
         light.setStyleSheet("""
             QLabel {
                 color: #BDBDBD;
@@ -449,7 +453,7 @@ class GroundStationUI(QMainWindow):
 
         label = QLabel(label_text)
         label.setAlignment(Qt.AlignCenter)
-        label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
+        label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Bold))
         label.setStyleSheet("""
             QLabel {
                 color: #455A64;
@@ -486,13 +490,31 @@ class GroundStationUI(QMainWindow):
     def build_status_panel(self):
         panel = QFrame()
         panel.setStyleSheet(self.style_sub_panel())
+        panel.setMinimumHeight(70)
+        panel.setMaximumHeight(90)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(5)
+        layout.setSpacing(4)
+
+        title = QLabel("系统状态")
+        title.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("border: none; color: #37474F;")
+
+        layout.addWidget(title)
+
+        node_layout = QGridLayout()
+        node_layout.setSpacing(4)
+
+        self.add_node_indicator(node_layout, "视觉", "VISION", 0, 0)
+        self.add_node_indicator(node_layout, "通信", "RECEIVER", 0, 1)
+        self.add_node_indicator(node_layout, "飞控", "FSM", 0, 2)
+
+        layout.addLayout(node_layout)
 
         self.comm_status_label = QLabel("通信：待连接")
-        self.comm_status_label.setFont(QFont("Microsoft YaHei UI", 10, QFont.Bold))
+        self.comm_status_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
         self.comm_status_label.setWordWrap(True)
         self.comm_status_label.setStyleSheet("""
             QLabel {
@@ -502,7 +524,7 @@ class GroundStationUI(QMainWindow):
         """)
 
         self.task_status_label = QLabel("任务：待启动")
-        self.task_status_label.setFont(QFont("Microsoft YaHei UI", 10, QFont.Bold))
+        self.task_status_label.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
         self.task_status_label.setWordWrap(True)
         self.task_status_label.setStyleSheet("""
             QLabel {
@@ -511,8 +533,12 @@ class GroundStationUI(QMainWindow):
             }
         """)
 
-        layout.addWidget(self.comm_status_label)
-        layout.addWidget(self.task_status_label)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(12)
+        status_row.addWidget(self.comm_status_label)
+        status_row.addWidget(self.task_status_label)
+
+        layout.addLayout(status_row)
 
         return panel
 
@@ -544,14 +570,17 @@ class GroundStationUI(QMainWindow):
         """)
 
         self.log_list = QListWidget()
+        self.log_list.setMinimumHeight(180)
+        self.log_list.setSpacing(2)
+        self.log_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.log_list.setStyleSheet("""
             QListWidget {
                 background-color: white;
                 border: 1px solid #CFD8DC;
                 border-radius: 6px;
                 color: #263238;
-                font-size: 11px;
-                padding: 4px;
+                font-size: 14px;
+                padding: 6px;
             }
         """)
 
@@ -574,12 +603,13 @@ class GroundStationUI(QMainWindow):
 
     def build_bottom_panel(self):
         panel = QFrame()
-        panel.setStyleSheet(self.style_panel())
+        panel.setStyleSheet(self.style_sub_panel())
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
         layout = QGridLayout(panel)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(10, 10, 10, 10)
         layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(5)
+        layout.setVerticalSpacing(6)
 
         self.task1_btn = QPushButton("任务1：巡查")
         self.task2_scan_btn = QPushButton("任务2.1")
@@ -598,8 +628,8 @@ class GroundStationUI(QMainWindow):
         ]
 
         for btn in buttons:
-            btn.setFixedHeight(30)
-            btn.setFont(QFont("Microsoft YaHei UI", 10, QFont.Bold))
+            btn.setFixedHeight(32)
+            btn.setFont(QFont("Microsoft YaHei UI", 11, QFont.Bold))
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.task1_btn.setStyleSheet(self.style_bottom_blue())
@@ -616,15 +646,14 @@ class GroundStationUI(QMainWindow):
         self.emergency_stop_btn.clicked.connect(self.emergency_stop_clicked.emit)
 
         layout.addWidget(self.task1_btn, 0, 0, 1, 2)
-        layout.addWidget(self.clear_log_btn, 0, 5, 1, 2)
-
         layout.addWidget(self.task2_scan_btn, 1, 0)
         layout.addWidget(self.task2_start_btn, 1, 1)
-        layout.addWidget(self.reset_btn, 1, 5, 1, 2)
-        layout.addWidget(self.emergency_stop_btn, 1, 7)
+        layout.addWidget(self.clear_log_btn, 2, 0)
+        layout.addWidget(self.reset_btn, 2, 1)
+        layout.addWidget(self.emergency_stop_btn, 3, 0, 1, 2)
 
-        for i in range(8):
-            layout.setColumnStretch(i, 1)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
 
         self.set_task2_start_enabled(False)
 
