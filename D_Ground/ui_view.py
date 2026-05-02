@@ -793,7 +793,7 @@ class GroundStationUI(QMainWindow):
 
         return coord.upper() in self.cell_buttons
 
-    def update_inventory_cell(self, coord: str, item_id: str):
+    def update_inventory_cell(self, coord: str, item_id: str, is_history: bool = False):
         coord = coord.upper()
 
         if coord not in self.cell_buttons:
@@ -810,8 +810,11 @@ class GroundStationUI(QMainWindow):
         self.inventory_data[coord] = value
 
         btn = self.cell_buttons[coord]
-        btn.setText(f"{coord}\nID:{value}")
-        btn.setStyleSheet(self.style_cell_done())
+        btn.setText(f"{coord}\n{value}")
+        if is_history:
+            btn.setStyleSheet(self.style_cell_history())
+        else:
+            btn.setStyleSheet(self.style_cell_done())
 
     def find_coord_by_item_id(self, item_id: str):
         if not str(item_id).isdigit():
@@ -959,6 +962,18 @@ class GroundStationUI(QMainWindow):
             }
             QPushButton:pressed {
                 background-color: #E0E0E0;
+            }
+        """
+
+
+    def style_cell_history(self):
+        return """
+            QPushButton {
+                background-color: #ECEFF1;
+                color: #37474F;
+                border: 2px solid #B0BEC5;
+                border-radius: 10px;
+                padding: 4px;
             }
         """
 
