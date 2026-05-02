@@ -157,7 +157,20 @@ class RouteMapWidget(QWidget):
         target = self._coord_point(field, self.target_coord)
         entry = self._entry_point(field, self.target_coord[0])
 
-        points = [start, entry, target, land]
+        _, top, _, _ = field
+        safe_y = top + 40
+
+        # 仅使用水平/竖直线，先到目标面入口，再到目标点，最后走上方安全通道到降落点
+        points = [
+            start,
+            (entry[0], start[1]),
+            entry,
+            (target[0], entry[1]),
+            target,
+            (target[0], safe_y),
+            (land[0], safe_y),
+            land,
+        ]
 
         painter.setPen(QPen(QColor("#1976D2"), 3))
         painter.setBrush(QBrush(QColor("#1976D2")))
@@ -251,21 +264,41 @@ class RouteMapWidget(QWidget):
         row_gap = (bottom - top) * 0.13
         col_gap = 26
 
-        row = (idx - 1) // 2
-        col = (idx - 1) % 2
+        # 位置规则：每个面为 2 列 × 3 行，且 1/2/3 更靠近板子
+        # A/C（左侧面）:
+        # 4 1
+        # 5 2
+        # 6 3
+        # B/D（右侧面）:
+        # 3 6
+        # 2 5
+        # 1 4
+        if face in ("A", "C"):
+            row_map = {1: 0, 2: 1, 3: 2, 4: 0, 5: 1, 6: 2}
+            near_map = {1: True, 2: True, 3: True, 4: False, 5: False, 6: False}
+        else:
+            row_map = {1: 2, 2: 1, 3: 0, 4: 2, 5: 1, 6: 0}
+            near_map = {1: True, 2: True, 3: True, 4: False, 5: False, 6: False}
+
+        row = row_map.get(idx, 0)
+        is_near = near_map.get(idx, True)
 
         if face == "A":
-            x0 = shelf1_x - 70
-            x = x0 - col * col_gap
+            x_near = shelf1_x - 44
+            x_far = x_near - col_gap
+            x = x_near if is_near else x_far
         elif face == "B":
-            x0 = shelf1_x + 45
-            x = x0 + col * col_gap
+            x_near = shelf1_x + 44
+            x_far = x_near + col_gap
+            x = x_near if is_near else x_far
         elif face == "C":
-            x0 = shelf2_x - 70
-            x = x0 - col * col_gap
+            x_near = shelf2_x - 44
+            x_far = x_near - col_gap
+            x = x_near if is_near else x_far
         elif face == "D":
-            x0 = shelf2_x + 45
-            x = x0 + col * col_gap
+            x_near = shelf2_x + 44
+            x_far = x_near + col_gap
+            x = x_near if is_near else x_far
         else:
             x = left + 60
 
