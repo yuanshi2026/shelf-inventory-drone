@@ -4,7 +4,7 @@
 import rospy
 
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
 
@@ -33,7 +33,10 @@ class MavrosSITLBridge:
         self.start_requested = False          # 是否收到一键启动
         self.stop_requested = False           # 是否收到停止指令
         self.land_sent = False                # 是否已经发送过降落命令
-        self.last_req = rospy.Time.now()      # 上一次请求 OFFBOARD / ARM 的时间
+        # ==================== 本次修改 1：FSM 完成后请求安全上锁 ====================
+        self.finish_requested = False         # 是否收到 FSM FINISH 状态
+        # =======================================================================
+        self.last_req = rospy.Time.now()      # 上一次请求 OFFBOARD / ARM / DISARM 的时间
 
         rospy.Subscriber(
             "/mavros/state",
@@ -62,6 +65,15 @@ class MavrosSITLBridge:
             self.stop_callback,
             queue_size=5
         )  # 订阅停止信号
+
+        # ==================== 本次修改 2：订阅 FSM 状态，用于 FINISH 后安全上锁 ====================
+        rospy.Subscriber(
+            "/fsm/state",
+            String,
+            self.fsm_state_callback,
+            queue_size=20
+        )  # 订阅 FSM 状态
+        # =============================================================================
 
         self.vel_pub = rospy.Publisher(
             self.mavros_vel_topic,
@@ -110,6 +122,9 @@ class MavrosSITLBridge:
             rospy.loginfo("Start requested.")
             self.start_requested = True
             self.stop_requested = False
+            # ==================== 本次修改 3：新任务启动时清除 FINISH 上锁请求 ====================
+            self.finish_requested = False
+            # ===========================================================================
             self.land_sent = False
 
     def stop_callback(self, msg):
@@ -118,6 +133,19 @@ class MavrosSITLBridge:
             rospy.logwarn("Stop requested.")
             self.stop_requested = True
             self.start_requested = False
+
+    # ==================== 本次修改 4：FSM FINISH 后停止 OFFBOARD 转发并请求上锁 ====================
+    def fsm_state_callback(self, msg):
+        """根据 FSM 状态处理任务完成后的安全逻辑。"""
+
+        state = msg.data.strip()
+
+        if state == "FINISH":  # FSM 已经完成降落流程
+            rospy.logwarn("FSM finished. Stop setpoint forwarding and request disarm.")
+            self.finish_requested = True
+            self.start_requested = False
+            self.stop_requested = False
+    # ===============================================================================
 
     def zero_cmd(self):
         """生成零速度指令。"""
@@ -166,6 +194,31 @@ class MavrosSITLBridge:
 
             self.last_req = now
 
+    # ==================== 本次修改 5：任务完成后尝试上锁，避免落地后仍 armed ====================
+    def try_disarm(self):
+        """尝试上锁飞控。"""
+
+        now = rospy.Time.now()  # 当前 ROS 时间
+
+        if now - self.last_req < rospy.Duration(1.0):  # 限制服务调用频率
+            return
+
+        if not self.current_state.armed:  # 已经上锁则无需重复请求
+            self.last_req = now
+            return
+
+        try:
+            response = self.arming_client(False)
+            if response.success:  # 飞控接受上锁请求
+                rospy.logwarn("Disarm requested after FSM FINISH.")
+            else:
+                rospy.logwarn("Disarm request rejected after FSM FINISH.")
+        except Exception as e:
+            rospy.logwarn("Disarm failed after FSM FINISH: %s", str(e))
+
+        self.last_req = now
+    # ============================================================================
+
     def try_land(self):
         """尝试调用 MAVROS 降落服务。"""
 
@@ -196,6 +249,14 @@ class MavrosSITLBridge:
         rate = rospy.Rate(self.rate_hz)  # 控制循环频率
 
         while not rospy.is_shutdown():  # ROS 未关闭时持续运行
+            # ==================== 本次修改 6：FINISH 后停止速度转发并持续尝试上锁 ====================
+            if self.finish_requested:  # 任务完成后的安全处理优先级最高
+                self.vel_pub.publish(self.zero_cmd())
+                self.try_disarm()
+                rate.sleep()
+                continue
+            # ===============================================================================
+
             if self.stop_requested:  # 停止优先级最高
                 self.vel_pub.publish(self.zero_cmd())
                 self.try_land()

@@ -117,6 +117,15 @@ class GroundUDPBridge:
         except Exception as e:
             rospy.logwarn("UDP send failed: %s", str(e))
 
+    # ==================== 本次修改 1：start/stop 指令重复发布，降低漏收概率 ====================
+    def publish_bool_repeated(self, pub, value, times=5, interval=0.05):
+        """重复发布 Bool 指令。"""
+
+        for _ in range(times):  # 连续发布多次
+            pub.publish(Bool(data=value))
+            time.sleep(interval)
+    # ===============================================================================
+
     def recv_loop(self):
         """持续接收地面站 UDP 指令。"""
 
@@ -167,7 +176,9 @@ class GroundUDPBridge:
             self.send_udp("REPLY:TASK1_STARTED")
             self.send_udp("STATUS:TASK1_RUNNING")
 
-            self.start_pub.publish(Bool(data=True))
+            # ==================== 本次修改 2：启动指令重复发布 ====================
+            self.publish_bool_repeated(self.start_pub, True)
+            # ==================================================================
             return
 
         if text == "CMD:START_TASK2":  # 启动任务 2：定向盘点
@@ -192,7 +203,9 @@ class GroundUDPBridge:
             self.send_udp("STATUS:ERROR")
             self.send_udp("REPLY:EMERGENCY_STOP_OK")
 
-            self.stop_pub.publish(Bool(data=True))
+            # ==================== 本次修改 3：停止指令重复发布 ====================
+            self.publish_bool_repeated(self.stop_pub, True)
+            # ==================================================================
             return
 
         if text == "CMD:PING":  # 通信测试指令

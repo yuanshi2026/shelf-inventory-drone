@@ -321,7 +321,9 @@ class Requirement1FSM:
             "type": "safe",
             "x": self.home_x,
             "y": self.home_y,
-            "z": self.takeoff_height,
+            # ==================== 本次修改 1：起飞高度改为相对 home_z ====================
+            "z": self.home_z + self.takeoff_height,
+            # =======================================================================
             "yaw": self.home_yaw
         }
 
@@ -669,14 +671,16 @@ class Requirement1FSM:
     def state_land(self):
         """LAND：缓慢下降。"""
 
-        if self.z > 0.18:  # 高度还较高时继续下降
+        # ==================== 本次修改 2：降落阈值改为相对 home_z ====================
+        if self.z > self.home_z + 0.18:  # 高度还较高时继续下降
             cmd = Twist()
             cmd.linear.z = -0.12
             self.cmd_pub.publish(cmd)
 
-        else:  # 接近地面后停止
+        else:  # 接近起飞点地面高度后停止
             self.stop_motion()
             self.set_state("FINISH")
+        # =======================================================================
 
     def state_finish(self):
         """FINISH：任务完成。"""
