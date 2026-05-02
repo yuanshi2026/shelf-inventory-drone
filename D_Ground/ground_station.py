@@ -66,6 +66,8 @@ class MainController:
         self.comm.start()
         self.ui.show()
 
+        self.load_inventory_data()
+
         self.ui.append_log("地面站启动完成")
         self.ui.append_log("当前为 D 题基础框架版")
         self.ui.append_log("等待无人机通信节点上线")
@@ -297,6 +299,45 @@ class MainController:
         except Exception as e:
             self.ui.append_log(f"保存 data.json 失败：{e}")
             return False
+
+
+    def load_inventory_data(self):
+        if not os.path.exists(self.data_file_path):
+            self.ui.append_log("未找到历史 data.json，使用空表")
+            return
+
+        try:
+            with open(self.data_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            coord_to_id = data.get("coord_to_id", {})
+            if not isinstance(coord_to_id, dict):
+                self.ui.append_log("历史 data.json 格式错误：coord_to_id 非字典")
+                return
+
+            loaded_count = 0
+            for coord, item_id in coord_to_id.items():
+                coord_key = str(coord).strip().upper()
+                item_text = str(item_id).strip()
+
+                if not self.ui.is_valid_coord(coord_key):
+                    continue
+                if not item_text.isdigit():
+                    continue
+
+                number = int(item_text)
+                if number < 1 or number > 24:
+                    continue
+
+                self.coord_to_id[coord_key] = number
+                self.id_to_coord[str(number)] = coord_key
+                self.ui.update_inventory_cell(coord_key, str(number), is_history=True)
+                loaded_count += 1
+
+            self.ui.append_log(f"已加载历史盘点数据 {loaded_count} 条")
+
+        except Exception as e:
+            self.ui.append_log(f"读取 data.json 失败：{e}")
 
     # ==================================================
     # 通信事件处理
