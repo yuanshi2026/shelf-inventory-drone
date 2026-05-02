@@ -76,7 +76,6 @@ class GroundStationUI(QMainWindow):
     def init_ui(self):
         self.setWindowTitle("TI杯D题 - 立体货架盘点无人机地面站")
         self.resize(self._base_width, self._base_height)
-        self.setMinimumSize(self._base_width, self._base_height)
 
         self.setStyleSheet("""
             QMainWindow {
@@ -436,7 +435,7 @@ class GroundStationUI(QMainWindow):
         self.query_input.setReadOnly(True)
         self.query_input.setAlignment(Qt.AlignCenter)
         self.query_input.setFont(QFont("Consolas", 14, QFont.Bold))
-        self.query_input.setFixedHeight(30)
+        self.query_input.setFixedHeight(52)
         self.query_input.setStyleSheet("""
             QLineEdit {
                 background-color: white;
@@ -479,13 +478,13 @@ class GroundStationUI(QMainWindow):
         for row in range(4):
             keypad_layout.setRowStretch(row, 1)
 
-        layout.addLayout(keypad_layout, 3)
+        layout.addLayout(keypad_layout, 6)
 
         self.query_output = QLabel("查询结果显示区")
         self.query_output.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
         self.query_output.setAlignment(Qt.AlignCenter)
         self.query_output.setWordWrap(True)
-        self.query_output.setMinimumHeight(40)
+        self.query_output.setMinimumHeight(24)
         self.query_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.query_output.setStyleSheet("""
             QLabel {
@@ -502,7 +501,7 @@ class GroundStationUI(QMainWindow):
         self.target_info.setFont(QFont("Microsoft YaHei UI", 8, QFont.Bold))
         self.target_info.setAlignment(Qt.AlignCenter)
         self.target_info.setWordWrap(True)
-        self.target_info.setMinimumHeight(38)
+        self.target_info.setMinimumHeight(30)
         self.target_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.target_info.setStyleSheet("""
             QLabel {
@@ -514,7 +513,6 @@ class GroundStationUI(QMainWindow):
             }
         """)
         layout.addWidget(self.target_info, 1)
-        layout.addStretch(1)
 
         return panel
 
