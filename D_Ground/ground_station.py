@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import QApplication
 
 from ui_view import GroundStationUI
 from comm_link import UDPComm
+from route_map_dialog import RouteMapDialog
 
 
 class MainController:
@@ -83,6 +84,7 @@ class MainController:
         self.ui.clear_log_requested.connect(self.handle_clear_log)
         self.ui.reset_requested.connect(self.handle_reset_all)
         self.ui.emergency_stop_clicked.connect(self.handle_emergency_stop)
+        self.ui.route_map_clicked.connect(self.handle_show_route_map)
 
     def bind_comm_signals(self):
         """
@@ -140,6 +142,19 @@ class MainController:
         self.ui.set_task_status("已发送紧急刹停指令")
         self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:EMERGENCY_STOP")
+
+    def handle_show_route_map(self):
+        """
+        显示任务2航线图弹窗
+        """
+        target_id = self.task2_target_id
+        target_coord = None
+
+        if target_id:
+            target_coord = self.id_to_coord.get(str(target_id))
+
+        dialog = RouteMapDialog(target_id=target_id, target_coord=target_coord, parent=self.ui)
+        dialog.exec_()
 
     def handle_launch_ros(self):
         """
