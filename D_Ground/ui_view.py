@@ -399,11 +399,8 @@ class GroundStationUI(QMainWindow):
             local_port = 8888
             self.recv_port_input.setText("8888")
 
-        drone_ip = self.ip_input.text().strip()
-
-        if not drone_ip:
-            drone_ip = "192.168.151.102"
-            self.ip_input.setText(drone_ip)
+        drone_ip = self.ip_input.text().strip() or "192.168.151.102"
+        self.ip_input.setText(drone_ip)
 
         try:
             drone_port = int(self.send_port_input.text().strip())

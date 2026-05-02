@@ -38,10 +38,22 @@ class MainController:
         self.inventory_saved_logged = False
         self.data_file_path = os.path.join(os.path.dirname(__file__), "data.json")
 
+        try:
+            local_port = int(self.ui.recv_port_input.text().strip())
+        except ValueError:
+            local_port = 8888
+
+        try:
+            drone_port = int(self.ui.send_port_input.text().strip())
+        except ValueError:
+            drone_port = 8889
+
+        drone_ip = self.ui.ip_input.text().strip() or "192.168.151.102"
+
         self.comm = UDPComm(
-            local_port=8888,
-            drone_ip="192.168.151.102",
-            drone_port=8889
+            local_port=local_port,
+            drone_ip=drone_ip,
+            drone_port=drone_port
         )
 
         self.bind_ui_signals()
@@ -99,6 +111,7 @@ class MainController:
         self.ui.append_log("按钮：启动任务1")
         self.ui.set_task_status("已发送任务1启动指令")
 
+        self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:START_TASK1")
 
     def handle_start_task2(self):
@@ -108,6 +121,7 @@ class MainController:
         self.ui.append_log("按钮：启动任务二定点盘点")
         self.ui.set_task_status("已发送任务二定点盘点启动指令")
 
+        self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:START_TASK2")
         self.ui.set_task2_start_enabled(False)
 
@@ -118,11 +132,13 @@ class MainController:
         self.ui.append_log("按钮：任务二识别目标")
         self.ui.set_task_status("已发送任务二目标识别指令")
 
+        self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:TASK2_SCAN_TARGET")
 
     def handle_emergency_stop(self):
         self.ui.append_log("按钮：紧急刹停")
         self.ui.set_task_status("已发送紧急刹停指令")
+        self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:EMERGENCY_STOP")
 
     def handle_launch_ros(self):
@@ -131,6 +147,7 @@ class MainController:
         """
         self.ui.append_log("已发送ROS启动指令，等待机载端响应……")
         self.ui.set_ros_launch_state("启动中...")
+        self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:LAUNCH")
 
     def handle_query(self, item_id: str):
@@ -186,6 +203,7 @@ class MainController:
         self.bind_comm_signals()
         self.comm.start()
 
+        self.user_ip_applied = bool(drone_ip)
         self.ui.append_log("网络配置应用完成")
 
     def handle_clear_log(self):
@@ -209,6 +227,21 @@ class MainController:
         self.last_comm_status = None
         self.task2_target_id = None
         self.comm_ready = False
+        self.drone_ip_seen = None
+        self.drone_last_seen = None
+        self.user_ip_applied = False
+
+    def sync_comm_target_from_ui(self):
+        drone_ip = self.ui.ip_input.text().strip() or "192.168.151.102"
+        try:
+            drone_port = int(self.ui.send_port_input.text().strip())
+        except ValueError:
+            drone_port = self.comm.drone_port
+
+        if drone_ip == self.comm.drone_ip and drone_port == self.comm.drone_port:
+            return
+
+        self.comm.update_target(drone_ip, drone_port)
 
     def reset_inventory_data(self, reset_ui: bool = True):
         self.coord_to_id = {}
@@ -288,8 +321,10 @@ class MainController:
                 self.ui.append_log(log_text)
             return
 
+        if status_key == "BOOT_WAITING":
+            return
+
         task_status_map = {
-            "BOOT_WAITING": "无人机引导程序等待启动",
             "TAKEOFF": "无人机起飞中",
             "TAKEOFF_OK": "无人机起飞成功",
             "TASK1_RUNNING": "任务1执行中",
@@ -322,10 +357,23 @@ class MainController:
         if status_key == "BOOT_WAITING":
             if not src_ip or src_ip.startswith("127."):
                 return
-            self.comm.update_target(src_ip, self.comm.drone_port)
-            self.ui.set_drone_ip(src_ip)
-            self.ui.set_task_status(f"无人机已上线，IP：{src_ip}")
-            self.ui.append_log(f"捕获无人机 IP：{src_ip}")
+            self.drone_last_seen = datetime.now()
+            previous_ip = self.drone_ip_seen
+
+            if not self.user_ip_applied:
+                self.comm.update_target(src_ip, self.comm.drone_port)
+                self.ui.set_drone_ip(src_ip)
+
+            if previous_ip is None:
+                self.drone_ip_seen = src_ip
+                if not self.user_ip_applied:
+                    self.ui.append_log(f"捕获到无人机上线：{src_ip}")
+                return
+
+            if src_ip != previous_ip:
+                self.drone_ip_seen = src_ip
+                if not self.user_ip_applied:
+                    self.ui.append_log(f"无人机 IP 已更新：{previous_ip} -> {src_ip}")
 
     def handle_scan(self, coord: str, item_id: str):
         """
