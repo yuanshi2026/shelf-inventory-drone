@@ -83,6 +83,7 @@ class MockDrone:
         self.ground_station_ip = GROUND_STATION_IP
         self.ground_station_port = GROUND_STATION_PORT
         self.task1_coords = build_d_task1_coords()
+        self.task1_scan_map = {}
 
         print("========================================")
         print("🚁 D题 Mock Drone 已启动")
@@ -192,6 +193,7 @@ class MockDrone:
 
             item_ids = list(range(1, len(self.task1_coords) + 1))
             random.shuffle(item_ids)
+            self.task1_scan_map = {}
 
             for index, coord in enumerate(self.task1_coords):
                 if self.emergency_stop:
@@ -206,6 +208,7 @@ class MockDrone:
                 time.sleep(SCAN_INTERVAL)
 
                 # 发送盘点结果
+                self.task1_scan_map[str(item_id)] = coord
                 self.send_to_ground(f"SCAN:{coord}:{item_id}")
 
                 time.sleep(SCAN_INTERVAL)
@@ -252,15 +255,19 @@ class MockDrone:
                 self.send_to_ground(f"TARGET_ID:{self.task2_target_id}")
                 time.sleep(0.2)
 
-            if not str(self.task2_target_id).isdigit():
+            target_id_str = str(self.task2_target_id).strip()
+            if not target_id_str.isdigit():
                 target_id = random.randint(1, 24)
+                target_id_str = str(target_id)
             else:
-                target_id = int(self.task2_target_id)
+                target_id = int(target_id_str)
 
-            if 1 <= target_id <= len(self.task1_coords):
-                coord = self.task1_coords[target_id - 1]
-            else:
-                coord = self.task1_coords[0]
+            coord = self.task1_scan_map.get(target_id_str)
+            if not coord:
+                if 1 <= target_id <= len(self.task1_coords):
+                    coord = self.task1_coords[target_id - 1]
+                else:
+                    coord = self.task1_coords[0]
 
             if self.emergency_stop:
                 self.send_to_ground("STATUS:ERROR")
