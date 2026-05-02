@@ -31,6 +31,8 @@ from route_map_dialog import RouteMapDialog
 
 
 class MainController:
+    COMM_WAIT_TIMEOUT_MS = 1500
+
     def __init__(self):
         self.ui = GroundStationUI()
         self.reset_state_cache()
@@ -59,6 +61,7 @@ class MainController:
 
         self.bind_ui_signals()
         self.bind_comm_signals()
+        QApplication.instance().aboutToQuit.connect(self.close)
 
         self.comm.start()
         self.ui.show()
@@ -206,8 +209,7 @@ class MainController:
             f"应用网络配置：本地端口 {local_port}，目标 {drone_ip}:{drone_port}"
         )
 
-        self.comm.stop()
-        self.comm.wait()
+        self.stop_comm_thread()
 
         self.comm = UDPComm(
             local_port=local_port,
@@ -488,10 +490,18 @@ class MainController:
 
     def close(self):
         try:
-            self.comm.stop()
-            self.comm.wait()
+            self.stop_comm_thread()
         except Exception:
             pass
+
+    def stop_comm_thread(self):
+        if not self.comm:
+            return
+
+        self.comm.stop()
+        finished = self.comm.wait(self.COMM_WAIT_TIMEOUT_MS)
+        if not finished:
+            self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
 
 
 if __name__ == "__main__":

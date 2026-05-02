@@ -88,6 +88,7 @@ class UDPComm(QThread):
 
         self.sock = None
         self.is_running = False
+        self.recv_timeout_sec = 0.5
 
     # ==================================================
     # 线程入口
@@ -103,6 +104,7 @@ class UDPComm(QThread):
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.bind(("0.0.0.0", self.local_port))
+            self.sock.settimeout(self.recv_timeout_sec)
 
             self.comm_status.emit(f"UDP监听已启动，端口 {self.local_port}")
 
@@ -123,6 +125,9 @@ class UDPComm(QThread):
             except OSError:
                 if not self.is_running:
                     break
+
+            except socket.timeout:
+                continue
 
             except Exception as e:
                 self.comm_status.emit(f"接收异常：{e}")
