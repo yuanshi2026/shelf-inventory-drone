@@ -236,7 +236,9 @@ class Requirement1FSM:
         if new_state == self.state:  # 状态没变则不处理
             return
 
-        rospy.loginfo("FSM: %s -> %s", self.state, new_state)
+        # ==================== 本次修改 1：状态切换时显著打印 ====================
+        rospy.loginfo("========== FSM STATE CHANGE: %s -> %s ==========", self.state, new_state)
+        # =======================================================================
 
         self.state = new_state
         self.state_enter_time = rospy.Time.now()
@@ -286,27 +288,28 @@ class Requirement1FSM:
 
         p = deepcopy(point)
 
-        px = float(point["x"])
-        py = float(point["y"])
-        pz = float(point["z"])
-        pyaw = float(point["yaw"])
+        px = float(point["x"])      # YAML 中的 x 坐标
+        py = float(point["y"])      # YAML 中的 y 坐标
+        pz = float(point["z"])      # YAML 中的 z 高度
+        pyaw = float(point["yaw"])  # YAML 中的目标 yaw
 
+        # ==================== 本次修改 2：相对坐标只平移，不再根据 home_yaw 旋转 ====================
         if self.use_relative:  # 使用相对起飞点坐标
-            c = math.cos(self.home_yaw)
-            s = math.sin(self.home_yaw)
-
-            x_map = self.home_x + c * px - s * py
-            y_map = self.home_y + s * px + c * py
-            yaw_map = normalize_angle(self.home_yaw + pyaw)
+            x_map = self.home_x + px
+            y_map = self.home_y + py
+            z_map = self.home_z + pz
+            yaw_map = pyaw
 
         else:  # 直接使用 YAML 中的绝对坐标
             x_map = px
             y_map = py
+            z_map = pz
             yaw_map = pyaw
+        # ==========================================================================================
 
         p["x"] = x_map
         p["y"] = y_map
-        p["z"] = pz
+        p["z"] = z_map
         p["yaw"] = yaw_map
 
         return p
