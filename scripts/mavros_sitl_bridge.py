@@ -5,8 +5,8 @@ import rospy
 
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, String
-from mavros_msgs.msg import State
-from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
+from mavros_msgs.msg import State, ExtendedState
+from mavros_msgs.srv import CommandBool, SetMode
 
 
 class MavrosSITLBridge:
@@ -23,27 +23,46 @@ class MavrosSITLBridge:
             "/mavros/setpoint_velocity/cmd_vel_unstamped"
         )  # MAVROS 速度控制话题
 
-        self.rate_hz = float(rospy.get_param("~rate_hz", 30.0))       # setpoint 发布频率
-        self.cmd_timeout = float(rospy.get_param("~cmd_timeout", 0.5)) # 指令超时时间
+        self.rate_hz = float(rospy.get_param("~rate_hz", 30.0))        # setpoint 发布频率
+        self.cmd_timeout = float(rospy.get_param("~cmd_timeout", 0.5))  # 指令超时时间
 
-        self.current_state = State()          # MAVROS 当前状态
-        self.last_cmd = Twist()               # 最近一次收到的速度指令
-        self.last_cmd_time = rospy.Time.now() # 最近一次收到速度指令的时间
+        self.current_state = State()             # MAVROS 当前状态，包含 mode/armed/connected
+        self.extended_state = ExtendedState()    # MAVROS 扩展状态，包含 landed_state
+        self.extended_state_ok = False           # 是否已经收到过 /mavros/extended_state
 
-        self.start_requested = False          # 是否收到一键启动
-        self.stop_requested = False           # 是否收到停止指令
-        self.land_sent = False                # 是否已经发送过降落命令
-        # ==================== 本次修改 1：FSM 完成后请求安全上锁 ====================
-        self.finish_requested = False         # 是否收到 FSM FINISH 状态
-        # =======================================================================
-        self.last_req = rospy.Time.now()      # 上一次请求 OFFBOARD / ARM / DISARM 的时间
+        self.last_cmd = Twist()                  # 最近一次收到的速度指令
+        self.last_cmd_time = rospy.Time.now()    # 最近一次收到速度指令的时间
+
+        self.start_requested = False             # 是否允许进入 OFFBOARD 并解锁
+        self.stop_requested = False              # 是否收到急停/停止请求
+
+        # ====================【新增】正常任务结束降落/上锁状态变量 ====================
+        # land_requested：收到 /uav/land 后置 True，bridge 负责切 AUTO.LAND。
+        # disarm_requested：落地后置 True，bridge 负责调用 /mavros/cmd/arming false。
+        # land_status：发布给 FSM 的降落状态，FSM 等到 DISARMED 后才进入 FINISH。
+        self.land_requested = False
+        self.disarm_requested = False
+        self.land_status = "IDLE"
+        self.last_land_status = ""
+        # ======================================================================
+
+        self.last_req = rospy.Time.now()         # 上一次请求 OFFBOARD/ARM/LAND/DISARM 的时间
 
         rospy.Subscriber(
             "/mavros/state",
             State,
             self.state_callback,
             queue_size=10
-        )  # 订阅 MAVROS 状态
+        )  # 订阅 MAVROS 基本状态
+
+        # ====================【新增】订阅 landed_state，确认真正落地后再 disarm ====================
+        rospy.Subscriber(
+            "/mavros/extended_state",
+            ExtendedState,
+            self.extended_state_callback,
+            queue_size=10
+        )  # 订阅 MAVROS 扩展状态，用 landed_state 判断是否落地
+        # ===========================================================================
 
         rospy.Subscriber(
             self.cmd_topic,
@@ -64,22 +83,38 @@ class MavrosSITLBridge:
             Bool,
             self.stop_callback,
             queue_size=5
-        )  # 订阅停止信号
+        )  # 订阅急停/停止信号
 
-        # ==================== 本次修改 2：订阅 FSM 状态，用于 FINISH 后安全上锁 ====================
+        # ====================【新增】正常结束控制话题，不再复用 /uav/stop ====================
         rospy.Subscriber(
-            "/fsm/state",
-            String,
-            self.fsm_state_callback,
-            queue_size=20
-        )  # 订阅 FSM 状态
-        # =============================================================================
+            "/uav/land",
+            Bool,
+            self.land_callback,
+            queue_size=5
+        )  # FSM 正常任务完成后发布 True，请求 PX4 AUTO.LAND
+
+        rospy.Subscriber(
+            "/uav/disarm",
+            Bool,
+            self.disarm_callback,
+            queue_size=5
+        )  # 手动安全上锁请求；若还在空中，会先走 AUTO.LAND
+        # ====================================================================
 
         self.vel_pub = rospy.Publisher(
             self.mavros_vel_topic,
             Twist,
             queue_size=20
         )  # 发布 MAVROS 速度 setpoint
+
+        # ====================【新增】bridge 向 FSM 回报降落/上锁进度 ====================
+        self.land_status_pub = rospy.Publisher(
+            "/uav/land_status",
+            String,
+            queue_size=10,
+            latch=True
+        )  # FSM 订阅该话题，收到 DISARMED 后进入 FINISH
+        # =====================================================================
 
         rospy.loginfo("Waiting for MAVROS services...")
         rospy.wait_for_service("/mavros/cmd/arming")
@@ -88,28 +123,24 @@ class MavrosSITLBridge:
         self.arming_client = rospy.ServiceProxy(
             "/mavros/cmd/arming",
             CommandBool
-        )  # 解锁服务客户端
+        )  # 解锁/上锁服务客户端
 
         self.set_mode_client = rospy.ServiceProxy(
             "/mavros/set_mode",
             SetMode
         )  # 切模式服务客户端
 
-        try:
-            rospy.wait_for_service("/mavros/cmd/land", timeout=3.0)
-            self.land_client = rospy.ServiceProxy(
-                "/mavros/cmd/land",
-                CommandTOL
-            )  # 降落服务客户端
-        except Exception:
-            self.land_client = None
-            rospy.logwarn("No /mavros/cmd/land service, stop will only send zero velocity.")
-
+        self.publish_land_status("IDLE")
         rospy.loginfo("mavros_sitl_bridge started.")
 
     def state_callback(self, msg):
         """保存 MAVROS 当前状态。"""
         self.current_state = msg
+
+    def extended_state_callback(self, msg):
+        """保存 MAVROS 扩展状态，主要用于判断 PX4 是否确认落地。"""
+        self.extended_state = msg
+        self.extended_state_ok = True
 
     def cmd_callback(self, msg):
         """保存 FSM 最新速度指令。"""
@@ -122,30 +153,62 @@ class MavrosSITLBridge:
             rospy.loginfo("Start requested.")
             self.start_requested = True
             self.stop_requested = False
-            # ==================== 本次修改 3：新任务启动时清除 FINISH 上锁请求 ====================
-            self.finish_requested = False
-            # ===========================================================================
-            self.land_sent = False
+
+            # ====================【新增】新任务开始时清除上一次降落/上锁请求 ====================
+            self.land_requested = False
+            self.disarm_requested = False
+            self.publish_land_status("IDLE")
+            # =====================================================================
 
     def stop_callback(self, msg):
-        """收到停止信号后，进入停止 / 降落流程。"""
+        """收到急停/停止信号后，走 AUTO.LAND，而不是直接 disarm。"""
         if msg.data:  # 收到 True 才停止
-            rospy.logwarn("Stop requested.")
-            self.stop_requested = True
+            rospy.logwarn("Stop requested. Switch to AUTO.LAND, then disarm after landed.")
             self.start_requested = False
+            self.stop_requested = True
 
-    # ==================== 本次修改 4：FSM FINISH 后停止 OFFBOARD 转发并请求上锁 ====================
-    def fsm_state_callback(self, msg):
-        """根据 FSM 状态处理任务完成后的安全逻辑。"""
+            # ====================【新增】急停也不直接上锁，先降落，再等 landed_state ====================
+            self.land_requested = True
+            self.disarm_requested = False
+            self.publish_land_status("LAND_REQUESTED_BY_STOP")
+            # ===========================================================================
 
-        state = msg.data.strip()
-
-        if state == "FINISH":  # FSM 已经完成降落流程
-            rospy.logwarn("FSM finished. Stop setpoint forwarding and request disarm.")
-            self.finish_requested = True
+    # ====================【新增】/uav/land 正常任务结束降落入口 ====================
+    def land_callback(self, msg):
+        """FSM 正常任务完成后，请求 PX4 进入 AUTO.LAND。"""
+        if msg.data:  # 收到 True 才执行降落流程
+            rospy.logwarn("/uav/land received. Switch PX4 to AUTO.LAND.")
             self.start_requested = False
             self.stop_requested = False
-    # ===============================================================================
+            self.land_requested = True
+            self.disarm_requested = False
+            self.publish_land_status("LAND_REQUESTED")
+    # ========================================================================
+
+    # ====================【新增】/uav/disarm 安全上锁入口 ====================
+    def disarm_callback(self, msg):
+        """手动请求安全上锁；如果尚未落地，则先进入 AUTO.LAND。"""
+        if msg.data:  # 收到 True 才处理
+            rospy.logwarn("/uav/disarm received. Safe disarm requested.")
+            self.start_requested = False
+            self.stop_requested = False
+            self.disarm_requested = True
+
+            if not self.is_landed():  # 空中不直接上锁，避免 PX4 拒绝或危险
+                self.land_requested = True
+                self.publish_land_status("DISARM_WAIT_LAND")
+            else:
+                self.publish_land_status("DISARM_REQUESTED")
+    # ======================================================================
+
+    def publish_land_status(self, status):
+        """发布降落/上锁状态；状态变化时同时打印日志。"""
+        self.land_status = status
+        self.land_status_pub.publish(String(data=status))
+
+        if status != self.last_land_status:  # 状态变化时打印，避免刷屏
+            rospy.logwarn("Landing status: %s", status)
+            self.last_land_status = status
 
     def zero_cmd(self):
         """生成零速度指令。"""
@@ -153,7 +216,6 @@ class MavrosSITLBridge:
 
     def get_safe_cmd(self):
         """返回安全速度指令；若 FSM 指令超时则返回零速度。"""
-
         age = (rospy.Time.now() - self.last_cmd_time).to_sec()  # 距离上次速度指令的时间
 
         if age > self.cmd_timeout:  # 超时则不再使用旧指令
@@ -161,9 +223,15 @@ class MavrosSITLBridge:
 
         return self.last_cmd
 
+    def is_landed(self):
+        """判断 PX4 是否已经确认落地。"""
+        return (
+            self.extended_state_ok and
+            self.extended_state.landed_state == ExtendedState.LANDED_STATE_ON_GROUND
+        )
+
     def try_enter_offboard_and_arm(self):
         """尝试切换 OFFBOARD 模式并解锁。"""
-
         now = rospy.Time.now()  # 当前 ROS 时间
 
         if now - self.last_req < rospy.Duration(1.0):  # 限制服务调用频率
@@ -171,12 +239,12 @@ class MavrosSITLBridge:
 
         if self.current_state.mode != "OFFBOARD":  # 还不是 OFFBOARD 时先切模式
             try:
-                response = self.set_mode_client(custom_mode="OFFBOARD")
+                response = self.set_mode_client(base_mode=0, custom_mode="OFFBOARD")
                 if response.mode_sent:  # 飞控接受切模式请求
                     rospy.loginfo("OFFBOARD mode requested.")
                 else:
                     rospy.logwarn("OFFBOARD request rejected.")
-            except Exception as e:
+            except Exception as e:  # 服务调用失败时进入这里
                 rospy.logwarn("Set OFFBOARD failed: %s", str(e))
 
             self.last_req = now
@@ -189,79 +257,105 @@ class MavrosSITLBridge:
                     rospy.loginfo("Arm requested.")
                 else:
                     rospy.logwarn("Arm request rejected.")
-            except Exception as e:
+            except Exception as e:  # 服务调用失败时进入这里
                 rospy.logwarn("Arming failed: %s", str(e))
 
             self.last_req = now
 
-    # ==================== 本次修改 5：任务完成后尝试上锁，避免落地后仍 armed ====================
-    def try_disarm(self):
-        """尝试上锁飞控。"""
-
+    # ====================【新增】切 PX4 AUTO.LAND，而不是自己用速度降落到底 ====================
+    def try_set_auto_land(self):
+        """请求 PX4 进入 AUTO.LAND 模式；成功后等待 landed_state。"""
         now = rospy.Time.now()  # 当前 ROS 时间
+
+        if self.current_state.mode == "AUTO.LAND":  # 已经处于自动降落模式
+            self.publish_land_status("WAIT_LANDED")
+            return
 
         if now - self.last_req < rospy.Duration(1.0):  # 限制服务调用频率
             return
 
-        if not self.current_state.armed:  # 已经上锁则无需重复请求
-            self.last_req = now
+        try:
+            response = self.set_mode_client(base_mode=0, custom_mode="AUTO.LAND")
+            if response.mode_sent:  # PX4 接受 AUTO.LAND 模式请求
+                self.publish_land_status("AUTO_LAND_SENT")
+                rospy.logwarn("AUTO.LAND mode requested.")
+            else:
+                self.publish_land_status("AUTO_LAND_REJECTED")
+                rospy.logwarn("AUTO.LAND request rejected.")
+        except Exception as e:  # 服务调用失败时进入这里
+            self.publish_land_status("AUTO_LAND_FAILED")
+            rospy.logwarn("Set AUTO.LAND failed: %s", str(e))
+
+        self.last_req = now
+    # ======================================================================
+
+    # ====================【新增】只在 PX4 确认落地后调用 disarm ====================
+    def try_disarm_after_landed(self):
+        """等待 landed_state=ON_GROUND 后，再调用 /mavros/cmd/arming false。"""
+        now = rospy.Time.now()  # 当前 ROS 时间
+
+        if not self.current_state.armed:  # 已经上锁，流程完成
+            self.land_requested = False
+            self.stop_requested = False
+            self.disarm_requested = False
+            self.publish_land_status("DISARMED")
+            return
+
+        if not self.is_landed():  # 未确认落地时，绝不直接 disarm
+            if not self.extended_state_ok:
+                self.publish_land_status("WAIT_EXTENDED_STATE")
+            else:
+                self.publish_land_status("WAIT_LANDED")
+            return
+
+        if now - self.last_req < rospy.Duration(1.0):  # 限制服务调用频率
             return
 
         try:
             response = self.arming_client(False)
-            if response.success:  # 飞控接受上锁请求
-                rospy.logwarn("Disarm requested after FSM FINISH.")
+            if response.success:  # PX4 接受上锁请求
+                self.publish_land_status("DISARMED")
+                self.land_requested = False
+                self.stop_requested = False
+                self.disarm_requested = False
+                rospy.logwarn("Disarm requested after PX4 confirmed landed.")
             else:
-                rospy.logwarn("Disarm request rejected after FSM FINISH.")
-        except Exception as e:
-            rospy.logwarn("Disarm failed after FSM FINISH: %s", str(e))
+                self.publish_land_status("DISARM_DENIED")
+                rospy.logwarn("Disarm denied, will retry after landed check.")
+        except Exception as e:  # 服务调用失败时进入这里
+            self.publish_land_status("DISARM_FAILED")
+            rospy.logwarn("Disarm failed: %s", str(e))
 
         self.last_req = now
-    # ============================================================================
+    # ======================================================================
 
-    def try_land(self):
-        """尝试调用 MAVROS 降落服务。"""
+    # ====================【新增】完整降落/上锁流程调度 ====================
+    def handle_land_and_disarm(self):
+        """先切 AUTO.LAND，再等 PX4 确认落地，最后上锁。"""
+        self.vel_pub.publish(self.zero_cmd())  # 降落流程中不继续转发 FSM 旧速度
 
-        if self.land_sent:  # 避免重复发送降落命令
-            return
+        if self.land_requested:  # 已请求降落时，持续尝试进入 AUTO.LAND
+            self.try_set_auto_land()
 
-        self.land_sent = True
+        if self.is_landed():  # PX4 确认落地后，才允许进入 disarm 流程
+            self.publish_land_status("LANDED")
+            self.disarm_requested = True
 
-        if self.land_client is None:  # 没有降落服务则只发送零速度
-            rospy.logwarn("No land service, only zero velocity.")
-            return
-
-        try:
-            self.land_client(
-                min_pitch=0.0,
-                yaw=0.0,
-                latitude=0.0,
-                longitude=0.0,
-                altitude=0.0
-            )
-            rospy.logwarn("Land command sent.")
-        except Exception as e:
-            rospy.logwarn("Land failed: %s", str(e))
+        if self.disarm_requested:  # 请求上锁时，只在落地后真正调用 arming false
+            self.try_disarm_after_landed()
+    # ==================================================================
 
     def run(self):
-        """主循环：持续发布 MAVROS setpoint。"""
-
+        """主循环：飞行时转发速度 setpoint；结束时执行 AUTO.LAND + DISARM。"""
         rate = rospy.Rate(self.rate_hz)  # 控制循环频率
 
         while not rospy.is_shutdown():  # ROS 未关闭时持续运行
-            # ==================== 本次修改 6：FINISH 后停止速度转发并持续尝试上锁 ====================
-            if self.finish_requested:  # 任务完成后的安全处理优先级最高
-                self.vel_pub.publish(self.zero_cmd())
-                self.try_disarm()
+            # ====================【新增】降落/上锁流程优先级最高 ====================
+            if self.land_requested or self.disarm_requested or self.stop_requested:
+                self.handle_land_and_disarm()
                 rate.sleep()
                 continue
-            # ===============================================================================
-
-            if self.stop_requested:  # 停止优先级最高
-                self.vel_pub.publish(self.zero_cmd())
-                self.try_land()
-                rate.sleep()
-                continue
+            # ================================================================
 
             if self.start_requested:  # 启动后进入 OFFBOARD 控制流程
                 self.try_enter_offboard_and_arm()

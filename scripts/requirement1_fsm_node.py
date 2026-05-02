@@ -84,6 +84,14 @@ class Requirement1FSM:
         self.laser_flash_time = float(self.mission.get("laser_flash_time", 0.5))   # 激光点亮时间
         self.ack_timeout = float(self.mission.get("ack_timeout", 0.4))             # 等待 ACK 时间
 
+        # ====================【新增】正常任务结束降落参数 ====================
+        # land_finish_timeout：FSM 在 LAND 状态等待 bridge 完成 AUTO.LAND + DISARM 的最长时间。
+        # 注意：超时后这里不会强行 FINISH，只会周期性报警；真机上不应绕过上锁确认。
+        self.land_finish_timeout = float(
+            self.mission.get("land_finish_timeout", 45.0)
+        )
+        # ================================================================
+
         self.cmd_pub = rospy.Publisher(
             self.cmd_vel_topic,
             Twist,
@@ -107,6 +115,14 @@ class Requirement1FSM:
             String,
             queue_size=20
         ) # FSM 状态发布器
+
+        # ====================【新增】正常任务完成后请求 mavros_sitl_bridge 自动降落/上锁 ====================
+        self.land_pub = rospy.Publisher(
+            "/uav/land",
+            Bool,
+            queue_size=5
+        ) # 正常降落请求发布器；不要复用 /uav/stop，/uav/stop 只保留给急停
+        # ==================================================================================
 
         rospy.Subscriber(
             self.odom_topic,
@@ -143,6 +159,15 @@ class Requirement1FSM:
             queue_size=20
         ) # 订阅地面站 ACK
 
+        # ====================【新增】订阅 bridge 的降落/上锁进度 ====================
+        rospy.Subscriber(
+            "/uav/land_status",
+            String,
+            self.land_status_callback,
+            queue_size=10
+        ) # 收到 DISARMED 后，FSM 才认为任务真正 FINISH
+        # ======================================================================
+
         self.current_pose_ok = False # 是否已收到定位
         self.x = 0.0                 # 当前 x 坐标
         self.y = 0.0                 # 当前 y 坐标
@@ -178,6 +203,12 @@ class Requirement1FSM:
 
         self.laser_started = False   # 当前激光状态中是否已经打开过激光
         self.result_sent = False     # 当前 SEND_RESULT 状态中是否已发送结果
+
+        # ====================【新增】LAND 状态与 mavros_sitl_bridge 的握手变量 ====================
+        self.land_requested = False              # 是否已经向 /uav/land 发布过降落请求
+        self.land_request_last_pub = rospy.Time(0) # 上次发布 /uav/land 的时间，用于低频重发
+        self.land_status = "IDLE"               # bridge 回传的降落/上锁状态
+        # ===============================================================================
 
         self.loop_rate = rospy.Rate(30) # FSM 主循环频率
 
@@ -230,6 +261,12 @@ class Requirement1FSM:
         """保存地面站 ACK 编号。"""
         self.last_ack_id = msg.data.strip()
 
+    # ====================【新增】接收 mavros_sitl_bridge 的降落/上锁状态 ====================
+    def land_status_callback(self, msg):
+        """保存 bridge 回传的降落状态，例如 WAIT_LANDED、LANDED、DISARMED。"""
+        self.land_status = msg.data.strip()
+    # ==========================================================================
+
     def set_state(self, new_state):
         """切换 FSM 状态。"""
 
@@ -249,6 +286,13 @@ class Requirement1FSM:
 
         if new_state == "SEND_RESULT":  # 进入发送结果状态时重置发送标志
             self.result_sent = False
+
+        # ====================【新增】进入 LAND 时重置降落请求状态 ====================
+        if new_state == "LAND":
+            self.land_requested = False
+            self.land_request_last_pub = rospy.Time(0)
+            self.land_status = "IDLE"
+        # ================================================================
 
     def state_elapsed(self):
         """返回当前状态已经持续的时间。"""
@@ -535,6 +579,12 @@ class Requirement1FSM:
             self.current_index = 0
             self.current_scan_point = None
 
+            # ====================【新增】新任务启动时清除上一次降落状态 ====================
+            self.land_requested = False
+            self.land_status = "IDLE"
+            self.land_request_last_pub = rospy.Time(0)
+            # ======================================================================
+
             self.set_state("TAKEOFF")
 
     def state_takeoff(self):
@@ -669,18 +719,40 @@ class Requirement1FSM:
             self.set_state("LAND")
 
     def state_land(self):
-        """LAND：缓慢下降。"""
+        """LAND：请求 mavros_sitl_bridge 切 AUTO.LAND，并等待真正落地上锁。"""
 
-        # ==================== 本次修改 2：降落阈值改为相对 home_z ====================
-        if self.z > self.home_z + 0.18:  # 高度还较高时继续下降
-            cmd = Twist()
-            cmd.linear.z = -0.12
-            self.cmd_pub.publish(cmd)
+        # ====================【重大修改】不再由 FSM 自己发 -0.12m/s 慢慢降到底 ====================
+        # 原逻辑：cmd.linear.z = -0.12，z <= home_z + 0.18 后直接 FINISH。
+        # 问题：PX4 可能还没判定 landed，此时直接 disarm 会出现 disarming denied。
+        # 新逻辑：FSM 只发布 /uav/land，请 mavros_sitl_bridge 执行：
+        #        AUTO.LAND -> 等 landed_state=ON_GROUND -> arming false -> 回传 DISARMED。
+        # =================================================================================
 
-        else:  # 接近起飞点地面高度后停止
+        self.stop_motion()  # LAND 状态中不再继续给桥发送旧速度指令
+        self.laser_off()    # 降落阶段确保激光关闭
+
+        now = rospy.Time.now()  # 当前 ROS 时间
+
+        if (
+            not self.land_requested or
+            now - self.land_request_last_pub > rospy.Duration(1.0)
+        ):
+            self.land_pub.publish(Bool(data=True))
+            self.land_requested = True
+            self.land_request_last_pub = now
+            rospy.logwarn_throttle(1.0, "FSM LAND: publishing /uav/land=True, waiting for bridge DISARMED.")
+
+        if self.land_status == "DISARMED":  # bridge 已确认 PX4 上锁
+            rospy.logwarn("FSM LAND: bridge reports DISARMED, mission FINISH.")
             self.stop_motion()
             self.set_state("FINISH")
-        # =======================================================================
+            return
+
+        if self.state_elapsed() > self.land_finish_timeout:  # 超时只报警，不强行 FINISH
+            rospy.logwarn_throttle(1.0,
+                "FSM LAND timeout: still waiting for DISARMED, current /uav/land_status=%s",
+                self.land_status
+            )
 
     def state_finish(self):
         """FINISH：任务完成。"""
