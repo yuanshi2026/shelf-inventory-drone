@@ -40,7 +40,7 @@ class MainController:
 
         self.comm = UDPComm(
             local_port=8888,
-            drone_ip="192.168.1.100",
+            drone_ip="192.168.151.102",
             drone_port=8889
         )
 
@@ -65,6 +65,7 @@ class MainController:
         self.ui.task1_clicked.connect(self.handle_start_task1)
         self.ui.task2_scan_clicked.connect(self.handle_task2_scan_target)
         self.ui.task2_start_clicked.connect(self.handle_start_task2)
+        self.ui.ros_launch_clicked.connect(self.handle_launch_ros)
         self.ui.query_entered.connect(self.handle_query)
         self.ui.network_changed.connect(self.handle_network_changed)
         self.ui.clear_log_requested.connect(self.handle_clear_log)
@@ -123,6 +124,14 @@ class MainController:
         self.ui.append_log("按钮：紧急刹停")
         self.ui.set_task_status("已发送紧急刹停指令")
         self.comm.send_data("CMD:EMERGENCY_STOP")
+
+    def handle_launch_ros(self):
+        """
+        一键启动 ROS
+        """
+        self.ui.append_log("已发送ROS启动指令，等待机载端响应……")
+        self.ui.set_ros_launch_state("启动中...")
+        self.comm.send_data("CMD:LAUNCH")
 
     def handle_query(self, item_id: str):
         """
@@ -194,10 +203,12 @@ class MainController:
             "VISION": False,
             "RECEIVER": False,
             "FSM": False,
+            "ROS": False,
         }
         self.last_task_status = None
         self.last_comm_status = None
         self.task2_target_id = None
+        self.comm_ready = False
 
     def reset_inventory_data(self, reset_ui: bool = True):
         self.coord_to_id = {}
@@ -256,15 +267,22 @@ class MainController:
         """
         status_key = status.strip().upper()
 
+        if not self.comm_ready:
+            self.comm_ready = True
+            self.ui.set_ros_launch_enabled(True)
+
         node_status_map = {
             "VISION_READY": ("VISION", "视觉节点已就绪"),
-            "RECEIVER_READY": ("RECEIVER", "通信节点已就绪"),
-            "FSM_READY": ("FSM", "飞控大脑已就绪"),
+            "RECEIVER_READY": ("RECEIVER", "通信接收节点已就绪"),
+            "FSM_READY": ("FSM", "飞控状态机已就绪"),
+            "ROS_READY": ("ROS", "ROS系统启动完成"),
         }
 
         if status_key in node_status_map:
             node_key, log_text = node_status_map[status_key]
             self.ui.set_node_ready(node_key, True)
+            if node_key == "ROS":
+                self.ui.set_ros_launch_state("ROS已启动")
             if not self.node_ready_state.get(node_key, False):
                 self.node_ready_state[node_key] = True
                 self.ui.append_log(log_text)
@@ -302,6 +320,8 @@ class MainController:
         status_key = status.strip().upper()
 
         if status_key == "BOOT_WAITING":
+            if not src_ip or src_ip.startswith("127."):
+                return
             self.comm.update_target(src_ip, self.comm.drone_port)
             self.ui.set_drone_ip(src_ip)
             self.ui.set_task_status(f"无人机已上线，IP：{src_ip}")

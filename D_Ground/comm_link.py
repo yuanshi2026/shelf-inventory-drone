@@ -22,6 +22,7 @@ D题：立体货架盘点无人机地面站通信模块
 STATUS:VISION_READY
 STATUS:RECEIVER_READY
 STATUS:FSM_READY
+STATUS:ROS_READY
 STATUS:BOOT_WAITING
 STATUS:TASK1_RUNNING
 STATUS:TASK2_RUNNING
@@ -78,7 +79,7 @@ class UDPComm(QThread):
     # REPLY:xxx
     reply_received = pyqtSignal(str)
 
-    def __init__(self, local_port=8888, drone_ip="192.168.1.100", drone_port=8889):
+    def __init__(self, local_port=8888, drone_ip="192.168.151.102", drone_port=8889):
         super().__init__()
 
         self.local_port = local_port

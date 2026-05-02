@@ -42,6 +42,7 @@ class GroundStationUI(QMainWindow):
     task1_clicked = pyqtSignal()
     task2_scan_clicked = pyqtSignal()
     task2_start_clicked = pyqtSignal()
+    ros_launch_clicked = pyqtSignal()
     query_entered = pyqtSignal(str)
     network_changed = pyqtSignal(int, str, int)
     clear_log_requested = pyqtSignal()
@@ -380,11 +381,11 @@ class GroundStationUI(QMainWindow):
         layout.addWidget(self.ip_input, 1, 1, alignment=Qt.AlignLeft)
         layout.addWidget(label_send, 2, 0)
         layout.addWidget(self.send_port_input, 2, 1, alignment=Qt.AlignLeft)
-        layout.addWidget(self.apply_network_btn, 0, 2, 3, 1, alignment=Qt.AlignVCenter)
+        layout.addWidget(self.apply_network_btn, 0, 2, 3, 1, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         layout.setColumnStretch(0, 0)
         layout.setColumnStretch(1, 0)
-        layout.setColumnStretch(2, 0)
+        layout.setColumnStretch(2, 1)
 
         return panel
 
@@ -614,6 +615,7 @@ class GroundStationUI(QMainWindow):
         self.add_node_indicator(node_layout, "视觉", "VISION", 0, 0)
         self.add_node_indicator(node_layout, "通信", "RECEIVER", 0, 1)
         self.add_node_indicator(node_layout, "飞控", "FSM", 0, 2)
+        self.add_node_indicator(node_layout, "ROS", "ROS", 0, 3)
 
         layout.addLayout(node_layout)
 
@@ -720,11 +722,13 @@ class GroundStationUI(QMainWindow):
         self.task1_btn = QPushButton("任务1：巡查")
         self.task2_scan_btn = QPushButton("任务2.1")
         self.task2_start_btn = QPushButton("任务2.2")
+        self.ros_launch_btn = QPushButton("一键启动ROS")
         self.clear_log_btn = QPushButton("清空日志")
         self.reset_btn = QPushButton("全局复位")
         self.emergency_stop_btn = QPushButton("紧急刹停")
 
         buttons = [
+            self.ros_launch_btn,
             self.task1_btn,
             self.task2_scan_btn,
             self.task2_start_btn,
@@ -740,10 +744,12 @@ class GroundStationUI(QMainWindow):
 
         self.task1_btn.setStyleSheet(self.style_bottom_blue())
         self.task2_scan_btn.setStyleSheet(self.style_bottom_green())
+        self.ros_launch_btn.setStyleSheet(self.style_bottom_gray())
         self.clear_log_btn.setStyleSheet(self.style_bottom_gray())
         self.reset_btn.setStyleSheet(self.style_bottom_red())
         self.emergency_stop_btn.setStyleSheet(self.style_bottom_red())
 
+        self.ros_launch_btn.clicked.connect(self.ros_launch_clicked.emit)
         self.task1_btn.clicked.connect(self.task1_clicked.emit)
         self.task2_scan_btn.clicked.connect(self.task2_scan_clicked.emit)
         self.task2_start_btn.clicked.connect(self.task2_start_clicked.emit)
@@ -751,17 +757,19 @@ class GroundStationUI(QMainWindow):
         self.reset_btn.clicked.connect(self.reset_requested.emit)
         self.emergency_stop_btn.clicked.connect(self.emergency_stop_clicked.emit)
 
-        layout.addWidget(self.task1_btn, 0, 0, 1, 2)
-        layout.addWidget(self.task2_scan_btn, 1, 0)
-        layout.addWidget(self.task2_start_btn, 1, 1)
-        layout.addWidget(self.clear_log_btn, 2, 0)
-        layout.addWidget(self.reset_btn, 2, 1)
-        layout.addWidget(self.emergency_stop_btn, 3, 0, 1, 2)
+        layout.addWidget(self.ros_launch_btn, 0, 0, 1, 2)
+        layout.addWidget(self.task1_btn, 1, 0, 1, 2)
+        layout.addWidget(self.task2_scan_btn, 2, 0)
+        layout.addWidget(self.task2_start_btn, 2, 1)
+        layout.addWidget(self.clear_log_btn, 3, 0)
+        layout.addWidget(self.reset_btn, 3, 1)
+        layout.addWidget(self.emergency_stop_btn, 4, 0, 1, 2)
 
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
 
         self.set_task2_start_enabled(False)
+        self.set_ros_launch_enabled(False)
 
         return panel
 
@@ -851,6 +859,17 @@ class GroundStationUI(QMainWindow):
         else:
             self.task2_start_btn.setStyleSheet(self.style_bottom_gray())
 
+    def set_ros_launch_enabled(self, enabled: bool):
+        self.ros_launch_btn.setEnabled(enabled)
+
+        if enabled:
+            self.ros_launch_btn.setStyleSheet(self.style_bottom_purple())
+        else:
+            self.ros_launch_btn.setStyleSheet(self.style_bottom_gray())
+
+    def set_ros_launch_state(self, text: str):
+        self.ros_launch_btn.setText(text)
+
     def reset_inventory_table(self):
         self.clear_highlight()
 
@@ -874,6 +893,8 @@ class GroundStationUI(QMainWindow):
         self.set_target_info("目标信息：暂无")
         self.set_task_status("待启动")
         self.set_task2_start_enabled(False)
+        self.set_ros_launch_state("一键启动ROS")
+        self.set_ros_launch_enabled(False)
 
     # ==================================================
     # 样式函数
@@ -1065,5 +1086,18 @@ class GroundStationUI(QMainWindow):
             }
             QPushButton:pressed {
                 background-color: #B71C1C;
+            }
+        """
+
+    def style_bottom_purple(self):
+        return """
+            QPushButton {
+                background-color: #7B1FA2;
+                color: white;
+                border-radius: 8px;
+                border: none;
+            }
+            QPushButton:pressed {
+                background-color: #4A148C;
             }
         """
