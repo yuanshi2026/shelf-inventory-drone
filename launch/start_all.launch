@@ -1,0 +1,107 @@
+<launch>
+    <!-- ===============================
+         1. MAVROS：Jetson 通过串口连接飞控
+         fcu_url 按真机串口设置为 /dev/ttyTHS0:921600
+    ================================ -->
+    <include file="$(find mavros)/launch/px4.launch">
+        <arg name="fcu_url" value="/dev/ttyTHS0:921600" />
+        <arg name="gcs_url" value="" />
+        <arg name="tgt_system" value="1" />
+        <arg name="tgt_component" value="1" />
+    </include>
+
+
+    <!-- ===============================
+         2. Livox 激光雷达驱动
+         这里沿用你之前启动命令：
+         roslaunch livox_ros_driver2 msg_MID360.launch
+    ================================ -->
+<include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch" />
+
+
+    <!-- ===============================
+         3. Faster-LIO / Fast-LIO 定位
+         这里沿用你之前启动命令：
+         roslaunch faster_lio rflysim.launch
+         如果真机有专门的 launch，后面把 rflysim.launch 换掉即可
+    ================================ -->
+    <include file="$(find faster_lio)/launch/rflysim.launch" />
+
+
+    <!-- ===============================
+         4. 加载任务航点参数
+         requirement1_fsm_node.py 从 ROS 参数服务器读取航点
+    ================================ -->
+    <rosparam file="$(find uav_inventory)/config/requirement1_mission.yaml"
+              command="load" />
+
+
+    <!-- ===============================
+         5. MAVROS 速度桥
+         作用：
+         /uav/cmd_vel
+             ↓
+         /mavros/setpoint_velocity/cmd_vel_unstamped
+    ================================ -->
+    <node pkg="uav_inventory"
+          type="mavros_sitl_bridge.py"
+          name="mavros_sitl_bridge"
+          output="screen">
+        <param name="cmd_topic" value="/uav/cmd_vel" />
+        <param name="mavros_vel_topic" value="/mavros/setpoint_velocity/cmd_vel_unstamped" />
+        <param name="rate_hz" value="30.0" />
+        <param name="cmd_timeout" value="0.5" />
+    </node>
+
+
+    <!-- ===============================
+         6. 任务 FSM
+         当前不启动 mavros_pose_to_odom.py，
+         直接订阅 MAVROS 自带的 nav_msgs/Odometry：
+         /mavros/local_position/odom
+    ================================ -->
+    <node pkg="uav_inventory"
+          type="requirement1_fsm_node.py"
+          name="requirement1_fsm_node"
+          output="screen">
+        <param name="odom_topic" value="/mavros/local_position/odom" />
+        <param name="cmd_vel_topic" value="/uav/cmd_vel" />
+    </node>
+
+
+    <!-- ===============================
+         7. 地面站 UDP 桥
+         Jetson 监听 8889，地面站监听 8888
+         ground_ip 改成你地面站电脑 / 树莓派的实际 IP
+    ================================ -->
+    <node pkg="uav_inventory"
+          type="ground_udp_bridge_node.py"
+          name="ground_udp_bridge_node"
+          output="screen">
+        <param name="local_ip" value="0.0.0.0" />
+        <param name="local_port" value="8889" />
+
+        <param name="ground_ip" value="192.168.151.101" />
+        <param name="ground_port" value="8888" />
+
+        <param name="heartbeat_interval" value="2.0" />
+    </node>
+    
+     <node pkg="uav_inventory"
+          type="qr_vision_node.py"
+          name="qr_vision_node"
+          output="screen">
+     <param name="enable_topic" value="/vision/enable" />
+     <param name="qr_result_topic" value="/qr/result" />
+
+     <param name="width" value="848" />
+     <param name="height" value="480" />
+     <param name="fps" value="30" />
+
+     <param name="publish_rate_hz" value="10.0" />
+     <param name="disabled_publish_rate_hz" value="1.0" />
+
+     <!-- 真机比赛建议 false，调试时可以改 true -->
+     <param name="show_debug" value="false" />
+</node>
+</launch>
