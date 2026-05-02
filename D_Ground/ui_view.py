@@ -48,6 +48,7 @@ class GroundStationUI(QMainWindow):
     clear_log_requested = pyqtSignal()
     reset_requested = pyqtSignal()
     emergency_stop_clicked = pyqtSignal()
+    route_map_clicked = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -512,7 +513,21 @@ class GroundStationUI(QMainWindow):
                 padding: 3px;
             }
         """)
-        layout.addWidget(self.target_info, 1)
+
+        self.route_map_btn = QPushButton("查看航线图")
+        self.route_map_btn.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
+        self.route_map_btn.setMinimumHeight(30)
+        self.route_map_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.route_map_btn.setStyleSheet(self.style_bottom_blue())
+        self.route_map_btn.clicked.connect(self.route_map_clicked.emit)
+
+        target_layout = QHBoxLayout()
+        target_layout.setContentsMargins(0, 0, 0, 0)
+        target_layout.setSpacing(4)
+        target_layout.addWidget(self.target_info, 1)
+        target_layout.addWidget(self.route_map_btn, 1)
+
+        layout.addLayout(target_layout, 1)
 
         return panel
 
