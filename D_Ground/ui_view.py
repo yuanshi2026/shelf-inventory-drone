@@ -614,7 +614,7 @@ class GroundStationUI(QMainWindow):
     def build_status_panel(self):
         panel = QFrame()
         panel.setStyleSheet(self.style_sub_panel())
-        panel.setMaximumHeight(96)
+        panel.setMaximumHeight(110)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -623,12 +623,13 @@ class GroundStationUI(QMainWindow):
         node_layout = QGridLayout()
         node_layout.setSpacing(3)
 
-        # 单行五灯：去掉 ROS/MAVROS 指示灯，保留任务关键链路
+        # 单行六灯：与 UDP 状态保持一致
         self.add_node_indicator(node_layout, "RECEIVER", "RECEIVER", 0, 0)
         self.add_node_indicator(node_layout, "FSM1", "FSM1", 0, 1)
         self.add_node_indicator(node_layout, "FSM2", "FSM2", 0, 2)
         self.add_node_indicator(node_layout, "VISION", "VISION", 0, 3)
-        self.add_node_indicator(node_layout, "MANAGER", "MANAGER", 0, 4)
+        self.add_node_indicator(node_layout, "MAVROS", "MAVROS", 0, 4)
+        self.add_node_indicator(node_layout, "MANAGER", "MANAGER", 0, 5)
 
         layout.addLayout(node_layout)
 

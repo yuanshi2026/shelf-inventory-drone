@@ -138,6 +138,7 @@ class MainController:
         if self.status_ping_paused:
             return
         self.sync_comm_target_from_ui()
+        self.comm.send_data("CMD:PING")
         self.comm.send_data("CMD:STATUS_PING")
 
     def handle_start_task1(self):
@@ -598,6 +599,7 @@ class MainController:
         reply_key = reply.strip().upper()
 
         reply_map = {
+            "PONG": "通信链路正常（PONG）",
             "TASK1_STARTED": "任务1已启动",
             "TASK2_STARTED": "任务二已启动",
             "MISSION_SAVED": "任务数据已保存",
