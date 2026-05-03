@@ -54,6 +54,23 @@ class Requirement1FSM:
 
         self.use_relative = bool(self.mission.get("use_relative", True)) # 是否使用相对起飞点坐标
         self.takeoff_height = float(self.mission.get("takeoff_height", 1.0)) # 起飞高度
+
+        # ====================【高度补偿 2026-05-03】相机初始离地高度 ====================
+        # 作用：
+        #   YAML 里的 takeoff_height 和各个航点 z，统一理解为“相机中心目标离地高度”。
+        #   由于起飞前相机本身已经离地 camera_initial_height，
+        #   所以记录 home_z 时需要减掉这个高度，避免实际相机高度偏高。
+        #
+        # 例子：
+        #   takeoff_height = 1.50
+        #   camera_initial_height = 0.15
+        #   最终无人机定位点目标高度 = home_z + 1.50 = self.z - 0.15 + 1.50 = self.z + 1.35
+        #   相机实际高度约为 1.35 + 0.15 = 1.50
+        self.camera_initial_height = float(
+            self.mission.get("camera_initial_height", 0.0)
+        )
+        # =======================================================================
+
         self.land_point = self.mission["land"]   # 降落点配置
         self.points = self.mission["points"]     # 航点列表
 
@@ -447,15 +464,35 @@ class Requirement1FSM:
 
         self.home_x = self.x
         self.home_y = self.y
-        self.home_z = self.z
+
+        # ====================【高度补偿 2026-05-03】相机高度补偿 ====================
+        # 原逻辑：
+        #   self.home_z = self.z
+        #
+        # 问题：
+        #   YAML 中写 z=1.50 时，FSM 会让无人机定位点上升 1.50m；
+        #   但相机起飞前已经离地 camera_initial_height，
+        #   所以相机实际高度会变成 1.50 + camera_initial_height。
+        #
+        # 新逻辑：
+        #   把 home_z 向下虚拟平移 camera_initial_height。
+        #   这样所有使用 home_z + z 的目标高度，都会自动降低 camera_initial_height。
+        #
+        # 注意：
+        #   这里是减，不是加。
+        self.home_z = self.z - self.camera_initial_height
+        # =======================================================================
+
         self.home_yaw = self.yaw
         self.home_set = True
 
         rospy.loginfo(
-            "Home set: x=%.2f y=%.2f z=%.2f yaw=%.1f deg",
+            "Home set: x=%.2f y=%.2f z=%.2f raw_z=%.2f camera_initial_height=%.2f yaw=%.1f deg",
             self.home_x,
             self.home_y,
             self.home_z,
+            self.z,
+            self.camera_initial_height,
             math.degrees(self.home_yaw)
         )
 
