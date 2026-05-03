@@ -237,6 +237,17 @@ class GroundUDPBridge:
             time.sleep(0.02)
 
     def parse_task2_target_id(self, text):
+        """解析任务2启动指令。
+
+        支持两种格式：
+        1. CMD:START_TASK2:<编号>  兼容旧地面站/手动测试
+        2. CMD:START_TASK2        使用任务2.1扫码得到的 latest_target_id
+        """
+        if text == "CMD:START_TASK2":
+            if 1 <= int(self.latest_target_id) <= 24:
+                return int(self.latest_target_id)
+            return None
+
         prefix = "CMD:START_TASK2:"
         if not text.startswith(prefix):
             return None
@@ -273,28 +284,33 @@ class GroundUDPBridge:
         if text.startswith("CMD:START_TASK2"):  # 启动任务 2：定向盘点
             target_id = self.parse_task2_target_id(text)
             if target_id is None:
-                self.send_udp("REPLY:UNKNOWN_CMD")
-                rospy.logwarn("Invalid task2 start command: %s", text)
+                self.send_udp("REPLY:NO_TARGET_ID")
+                rospy.logwarn("Task2 start rejected: no valid target id. command=%s latest_target_id=%s", text, self.latest_target_id)
                 return
 
             self.latest_target_id = target_id
             self.task1_running = False
             self.task2_running = True
-            self.latest_target_id = target_id
 
             self.send_udp("TARGET_ID:{}".format(target_id))
             self.send_udp("REPLY:TASK2_STARTED")
             self.send_udp("STATUS:TASK2_RUNNING")
 
-            # 先发布目标编号，再请求任务仲裁器启动 TASK2
+            # 先发布目标编号，再请求任务仲裁器启动 TASK2。
             self.task2_target_pub.publish(String(data=str(target_id)))
             time.sleep(0.05)
             self.publish_bool_repeated(self.task2_start_pub, True)
             return
 
-        if text == "CMD:TASK2_SCAN_TARGET":  # 任务 2 起飞前扫描抽取二维码
+        if text == "CMD:TASK2_SCAN_TARGET":  # 任务 2.1：起飞前原地扫码获取目标编号
+            self.task1_running = False
+            self.task2_running = False
+            self.latest_target_id = -1
+
+            self.send_udp("REPLY:TASK2_SCAN_TARGET_STARTED")
             self.send_udp("STATUS:SCANNING")
-            self.target_scan_pub.publish(Bool(data=True))
+
+            self.publish_bool_repeated(self.target_scan_pub, True)
             return
 
         if text == "CMD:EMERGENCY_STOP":  # 紧急停止：悬停锁存，不再继续旧任务
@@ -357,7 +373,7 @@ class GroundUDPBridge:
         elif state in ["GOTO_MISSION_POINT", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT"]:  # 正在执行航线
             self.send_udp("STATUS:MISSION_RUNNING")
 
-        elif state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT", "VERIFY_TARGET"]:  # 正在扫描/核验
+        elif state in ["SCAN_TARGET_ID", "HOVER_BEFORE_SCAN", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT", "VERIFY_TARGET"]:  # 正在扫描/核验
             self.send_udp("STATUS:SCANNING")
 
         elif state == "NEXT_POINT":  # 当前点完成，进入下一点

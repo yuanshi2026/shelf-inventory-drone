@@ -10,6 +10,7 @@ import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
+from mavros_msgs.msg import State
 
 try:
     import rospkg
@@ -75,6 +76,23 @@ class Task2FSM:
         self.max_vel_z = float(self.routes.get("max_vel_z", 0.10))
         self.max_yaw_rate = float(self.routes.get("max_yaw_rate", 0.35))
 
+        # 与任务1看齐：距离限速 + 限加速度，避免起步、刹车、切航点时速度突变。
+        self.max_acc_xy = float(self.routes.get("max_acc_xy", 0.18))
+        self.max_acc_z = float(self.routes.get("max_acc_z", 0.12))
+        self.max_acc_yaw = float(self.routes.get("max_acc_yaw", 0.35))
+        self.min_slow_distance_xy = float(self.routes.get("min_slow_distance_xy", 0.20))
+        self.min_slow_distance_z = float(self.routes.get("min_slow_distance_z", 0.15))
+        self.yaw_first_threshold = math.radians(float(self.routes.get("yaw_first_threshold_deg", 18.0)))
+        self.arrive_hold_time = float(self.routes.get("arrive_hold_time", 0.40))
+
+        # 与任务1看齐：到扫码点后先纯悬停停稳，再打开视觉。
+        self.scan_pre_hover_time = float(self.routes.get("scan_pre_hover_time", 2.0))
+        self.scan_pre_hover_timeout = float(self.routes.get("scan_pre_hover_timeout", 3.0))
+        self.settle_vel_xy_eps = float(self.routes.get("settle_vel_xy_eps", 0.05))
+        self.settle_vel_z_eps = float(self.routes.get("settle_vel_z_eps", 0.04))
+        self.settle_yaw_rate_eps = float(self.routes.get("settle_yaw_rate_eps", 0.12))
+        self.target_scan_timeout = float(self.routes.get("target_scan_timeout", 8.0))
+
         # 图像对齐参数：只做横向 + 上下微调，不做前后微调。
         self.laser_u = float(self.routes.get("laser_u", 424.0))
         self.laser_v = float(self.routes.get("laser_v", 240.0))
@@ -100,20 +118,25 @@ class Task2FSM:
         self.state_pub = rospy.Publisher("/fsm2/state", String, queue_size=20)
         self.vision_enable_pub = rospy.Publisher("/vision/enable", Bool, queue_size=5)
         self.target_result_pub = rospy.Publisher("/target/result", String, queue_size=10)
+        self.target_id_pub = rospy.Publisher("/target/id", String, queue_size=10)
         self.land_pub = rospy.Publisher("/uav/land", Bool, queue_size=5)
+        self.stop_pub = rospy.Publisher("/uav/stop", Bool, queue_size=5)
 
         rospy.Subscriber(self.odom_topic, Odometry, self.odom_callback, queue_size=20)
         rospy.Subscriber("/mission/mode", String, self.mode_callback, queue_size=10)
         rospy.Subscriber("/uav/start_task2", Bool, self.start_callback, queue_size=5)
+        rospy.Subscriber("/uav/scan_target", Bool, self.scan_target_callback, queue_size=5)
         rospy.Subscriber("/task2/target_id", String, self.target_id_callback, queue_size=10)
         rospy.Subscriber("/uav/stop", Bool, self.stop_callback, queue_size=5)
         rospy.Subscriber("/uav/reset", Bool, self.reset_callback, queue_size=5)
+        rospy.Subscriber("/mavros/state", State, self.mavros_state_callback, queue_size=10)
         rospy.Subscriber("/uav/land_status", String, self.land_status_callback, queue_size=10)
         rospy.Subscriber("/qr/result", String, self.qr_callback, queue_size=20)
         rospy.Subscriber("/inventory/result", String, self.inventory_result_callback, queue_size=50)
 
         self.current_pose_ok = False
         self.x = self.y = self.z = self.yaw = 0.0
+        self.vx = self.vy = self.vz = self.yaw_rate = 0.0
         self.home_set = False
         self.home_x = self.home_y = self.home_z = self.home_yaw = 0.0
 
@@ -123,7 +146,14 @@ class Task2FSM:
 
         self.start_requested = False
         self.stop_requested = False
+        self.scan_target_requested = False
         self.emergency_latched = False
+        self.emergency_stop_last_pub = rospy.Time(0)
+        self.mavros_state = State()
+        self.mavros_state_ok = False
+        self.arrive_hold_start = None
+        self.smooth_cmd = Twist()
+        self.last_control_time = rospy.Time.now()
 
         self.target_id = -1
         self.target_coord = ""
@@ -189,14 +219,21 @@ class Task2FSM:
         self.state = new_state
         self.state_enter_time = rospy.Time.now()
         self.state_pub.publish(String(data=self.state))
+
         if new_state == "LAND":
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
-        if new_state in ["IDLE", "LOAD_TARGET", "TAKEOFF", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT", "RETURN_ROUTE", "LAND", "FINISH", "EMERGENCY_STOP"]:
-            self.set_vision(False)
-        if new_state in ["SEARCH_QR", "ALIGN_QR", "VERIFY_TARGET"]:
+
+        # 扫码相关状态才打开视觉；飞行、停稳、降落、急停都关闭视觉。
+        if new_state in ["SCAN_TARGET_ID", "SEARCH_QR", "ALIGN_QR", "VERIFY_TARGET"]:
             self.set_vision(True)
+        else:
+            self.set_vision(False)
+
+        # 进入新的移动目标时重置到点稳定计时。
+        if new_state in ["TAKEOFF", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT", "RETURN_ROUTE"]:
+            self.arrive_hold_start = None
 
     def state_elapsed(self):
         return (rospy.Time.now() - self.state_enter_time).to_sec()
@@ -205,7 +242,46 @@ class Task2FSM:
         self.vision_enable_pub.publish(Bool(data=bool(enabled)))
 
     def stop_motion(self):
+        self.smooth_cmd = Twist()
+        self.last_control_time = rospy.Time.now()
         self.cmd_pub.publish(Twist())
+
+    def limit_step(self, target_value, current_value, max_delta):
+        delta = target_value - current_value
+        if delta > max_delta:
+            return current_value + max_delta
+        if delta < -max_delta:
+            return current_value - max_delta
+        return target_value
+
+    def publish_smooth_cmd(self, target_cmd):
+        now = rospy.Time.now()
+        dt = (now - self.last_control_time).to_sec()
+        if dt <= 0.0 or dt > 0.20:
+            dt = 1.0 / 30.0
+        self.last_control_time = now
+
+        max_dxy = self.max_acc_xy * dt
+        max_dz = self.max_acc_z * dt
+        max_dyaw = self.max_acc_yaw * dt
+
+        self.smooth_cmd.linear.x = self.limit_step(target_cmd.linear.x, self.smooth_cmd.linear.x, max_dxy)
+        self.smooth_cmd.linear.y = self.limit_step(target_cmd.linear.y, self.smooth_cmd.linear.y, max_dxy)
+        self.smooth_cmd.linear.z = self.limit_step(target_cmd.linear.z, self.smooth_cmd.linear.z, max_dz)
+        self.smooth_cmd.angular.z = self.limit_step(target_cmd.angular.z, self.smooth_cmd.angular.z, max_dyaw)
+
+        self.cmd_pub.publish(self.smooth_cmd)
+
+    def brake_motion(self):
+        self.publish_smooth_cmd(Twist())
+
+    def distance_limited_speed(self, error_abs, max_speed, max_acc, slow_distance):
+        if error_abs <= 0.0:
+            return 0.0
+        slow_distance = max(slow_distance, 1e-3)
+        ratio_speed = max_speed * min(1.0, error_abs / slow_distance)
+        brake_speed = math.sqrt(max(0.0, 2.0 * max_acc * error_abs))
+        return min(max_speed, ratio_speed, brake_speed)
 
     def mode_callback(self, msg):
         self.mode = msg.data.strip()
@@ -215,6 +291,10 @@ class Task2FSM:
         ori = msg.pose.pose.orientation
         self.x, self.y, self.z = pos.x, pos.y, pos.z
         self.yaw = yaw_from_quaternion(ori)
+        self.vx = msg.twist.twist.linear.x
+        self.vy = msg.twist.twist.linear.y
+        self.vz = msg.twist.twist.linear.z
+        self.yaw_rate = msg.twist.twist.angular.z
         self.current_pose_ok = True
 
     def start_callback(self, msg):
@@ -224,17 +304,38 @@ class Task2FSM:
                 return
             self.start_requested = True
 
+    def scan_target_callback(self, msg):
+        if msg.data:
+            if self.emergency_latched:
+                rospy.logerr("TASK2 scan target ignored: emergency_latched=True, publish /uav/reset first.")
+                return
+            self.scan_target_requested = True
+
     def stop_callback(self, msg):
         if msg.data:
+            if self.emergency_latched:
+                return
             self.trigger_emergency_stop()
+
+    def mavros_state_callback(self, msg):
+        self.mavros_state = msg
+        self.mavros_state_ok = True
 
     def reset_callback(self, msg):
         if not msg.data:
             return
+        if not self.mavros_state_ok:
+            rospy.logerr("TASK2 reset rejected: no /mavros/state yet. Cannot prove vehicle is disarmed.")
+            return
+        if self.mavros_state.armed:
+            rospy.logerr("TASK2 reset rejected: vehicle is still armed. Land/disarm and move back to start point first.")
+            return
+
         rospy.logwarn("TASK2 reset accepted, back to IDLE.")
         self.emergency_latched = False
         self.start_requested = False
         self.stop_requested = False
+        self.scan_target_requested = False
         self.target_id = -1
         self.target_coord = ""
         self.target_face = ""
@@ -242,6 +343,11 @@ class Task2FSM:
         self.result_sent = False
         self.land_requested = False
         self.land_status = "IDLE"
+        self.arrive_hold_start = None
+        self.smooth_cmd = Twist()
+        self.last_control_time = rospy.Time.now()
+        self.qr = {"found": False, "id": -1, "u": -1.0, "v": -1.0, "area": 0.0}
+        self.qr_stamp = rospy.Time(0)
         self.set_vision(False)
         self.stop_motion()
         self.set_state("IDLE")
@@ -338,12 +444,38 @@ class Task2FSM:
         ey = target["y"] - self.y
         ez = target["z"] - self.z
         eyaw = normalize_angle(target["yaw"] - self.yaw)
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
         cmd = Twist()
-        cmd.linear.x = clamp(self.kp_xy * ex, -self.max_vel_xy, self.max_vel_xy)
-        cmd.linear.y = clamp(self.kp_xy * ey, -self.max_vel_xy, self.max_vel_xy)
-        cmd.linear.z = clamp(self.kp_z * ez, -self.max_vel_z, self.max_vel_z)
-        cmd.angular.z = clamp(self.kp_yaw * eyaw, -self.max_yaw_rate, self.max_yaw_rate)
-        self.cmd_pub.publish(cmd)
+
+        yaw_speed = self.distance_limited_speed(
+            abs(eyaw),
+            self.max_yaw_rate,
+            self.max_acc_yaw,
+            math.radians(8.0)
+        )
+        cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
+
+        if abs(eyaw) > self.yaw_first_threshold:
+            z_speed = self.distance_limited_speed(abs(ez), self.max_vel_z, self.max_acc_z, self.min_slow_distance_z)
+            cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+            self.publish_smooth_cmd(cmd)
+            return
+
+        if horizontal_error > 1e-4:
+            xy_speed = self.distance_limited_speed(
+                horizontal_error,
+                self.max_vel_xy,
+                self.max_acc_xy,
+                self.min_slow_distance_xy
+            )
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        z_speed = self.distance_limited_speed(abs(ez), self.max_vel_z, self.max_acc_z, self.min_slow_distance_z)
+        cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+
+        self.publish_smooth_cmd(cmd)
 
     def arrived_target(self, target):
         ex = target["x"] - self.x
@@ -353,6 +485,27 @@ class Task2FSM:
         horizontal_error = math.sqrt(ex * ex + ey * ey)
         return horizontal_error < self.arrive_pos_eps and abs(ez) < self.arrive_z_eps and abs(eyaw) < self.arrive_yaw_eps
 
+    def velocity_stable(self):
+        vel_xy = math.sqrt(self.vx * self.vx + self.vy * self.vy)
+        return (
+            vel_xy < self.settle_vel_xy_eps and
+            abs(self.vz) < self.settle_vel_z_eps and
+            abs(self.yaw_rate) < self.settle_yaw_rate_eps
+        )
+
+    def reached_and_hold(self, target):
+        if not self.arrived_target(target):
+            self.arrive_hold_start = None
+            return False
+        self.brake_motion()
+        if self.arrive_hold_start is None:
+            self.arrive_hold_start = rospy.Time.now()
+            return False
+        if rospy.Time.now() - self.arrive_hold_start < rospy.Duration(self.arrive_hold_time):
+            return False
+        self.arrive_hold_start = None
+        return True
+
     def publish_body_velocity(self, vx_body, vy_body, vz, yaw_rate):
         c = math.cos(self.yaw)
         s = math.sin(self.yaw)
@@ -361,7 +514,7 @@ class Task2FSM:
         cmd.linear.y = s * vx_body + c * vy_body
         cmd.linear.z = vz
         cmd.angular.z = yaw_rate
-        self.cmd_pub.publish(cmd)
+        self.publish_smooth_cmd(cmd)
 
     def fresh_qr_found(self):
         age = (rospy.Time.now() - self.qr_stamp).to_sec()
@@ -380,22 +533,23 @@ class Task2FSM:
         self.publish_body_velocity(0.0, vy_body, vz, 0.0)
 
     def small_search_motion(self):
-        t = self.state_elapsed()
-        if t < 1.0:
-            self.publish_body_velocity(0.0, 0.035, 0.0, 0.0)
-        elif t < 2.0:
-            self.publish_body_velocity(0.0, -0.035, 0.0, 0.0)
-        elif t < 2.5:
-            self.publish_body_velocity(0.0, 0.0, 0.025, 0.0)
-        else:
-            self.publish_body_velocity(0.0, 0.0, -0.025, 0.0)
+        # 与任务1看齐：任务2不再在货架前左右/上下搜索，只原地刹车等待二维码。
+        self.brake_motion()
+
+    def publish_stop_to_bridge(self, force=False):
+        now = rospy.Time.now()
+        if force or now - self.emergency_stop_last_pub > rospy.Duration(1.0):
+            self.stop_pub.publish(Bool(data=True))
+            self.emergency_stop_last_pub = now
 
     def trigger_emergency_stop(self):
         if not self.emergency_latched:
             rospy.logerr("TASK2 EMERGENCY STOP LATCHED")
+            self.publish_stop_to_bridge(force=True)
         self.emergency_latched = True
         self.stop_requested = True
         self.start_requested = False
+        self.scan_target_requested = False
         self.set_vision(False)
         self.stop_motion()
         self.set_state("EMERGENCY_STOP")
@@ -471,6 +625,7 @@ class Task2FSM:
             if self.emergency_latched:
                 self.set_vision(False)
                 self.stop_motion()
+                self.publish_stop_to_bridge()
                 self.set_state("EMERGENCY_STOP")
                 self.loop_rate.sleep()
                 continue
@@ -480,7 +635,8 @@ class Task2FSM:
                 self.loop_rate.sleep()
                 continue
 
-            if self.mode != "TASK2" and self.state not in ["IDLE", "FINISH"]:
+            # SCAN_TARGET_ID 是起飞前原地扫码流程，不要求 mission_manager 切到 TASK2。
+            if self.mode != "TASK2" and self.state not in ["IDLE", "FINISH", "SCAN_TARGET_ID"]:
                 self.set_vision(False)
                 self.stop_motion()
                 self.set_state("IDLE")
@@ -494,6 +650,8 @@ class Task2FSM:
 
             if self.state == "IDLE":
                 self.state_idle()
+            elif self.state == "SCAN_TARGET_ID":
+                self.state_scan_target_id()
             elif self.state == "LOAD_TARGET":
                 self.state_load_target()
             elif self.state == "TAKEOFF":
@@ -502,6 +660,8 @@ class Task2FSM:
                 self.state_goto_route_to_face()
             elif self.state == "GOTO_SCAN_POINT":
                 self.state_goto_scan_point()
+            elif self.state == "HOVER_BEFORE_SCAN":
+                self.state_hover_before_scan()
             elif self.state == "SEARCH_QR":
                 self.state_search_qr()
             elif self.state == "ALIGN_QR":
@@ -522,12 +682,43 @@ class Task2FSM:
     def state_idle(self):
         self.set_vision(False)
         self.stop_motion()
+
+        if self.scan_target_requested:
+            self.scan_target_requested = False
+            self.target_id = -1
+            self.qr = {"found": False, "id": -1, "u": -1.0, "v": -1.0, "area": 0.0}
+            self.qr_stamp = rospy.Time(0)
+            self.set_state("SCAN_TARGET_ID")
+            return
+
         if self.start_requested and self.mode == "TASK2":
             self.start_requested = False
             self.stop_requested = False
             self.result_sent = False
             self.set_home()
             self.set_state("LOAD_TARGET")
+
+    def state_scan_target_id(self):
+        """任务2.1：起飞前原地开视觉扫码，得到目标编号并上报地面站。"""
+        self.set_vision(True)
+        self.brake_motion()
+
+        if self.fresh_qr_found():
+            scanned_id = int(self.qr["id"])
+            if 1 <= scanned_id <= 24:
+                self.target_id = scanned_id
+                self.target_id_pub.publish(String(data=str(scanned_id)))
+                rospy.logwarn("TASK2 target scanned: %d", scanned_id)
+                self.stop_motion()
+                self.set_vision(False)
+                self.set_state("IDLE")
+                return
+
+        if self.state_elapsed() > self.target_scan_timeout:
+            rospy.logwarn("TASK2 target scan timeout. No valid target id scanned.")
+            self.stop_motion()
+            self.set_vision(False)
+            self.set_state("IDLE")
 
     def state_load_target(self):
         if self.target_id < 1:
@@ -543,14 +734,16 @@ class Task2FSM:
 
     def state_takeoff(self):
         target = self.make_takeoff_target()
-        self.goto_target(target)
-        if self.arrived_target(target):
+        if self.reached_and_hold(target):
             self.stop_motion()
             self.route_index = 0
             if self.target_route_to_face:
                 self.set_state("GOTO_ROUTE_TO_FACE")
             else:
                 self.set_state("GOTO_SCAN_POINT")
+            return
+        if self.arrive_hold_start is None:
+            self.goto_target(target)
 
     def state_goto_route_to_face(self):
         if self.route_index >= len(self.target_route_to_face):
@@ -559,30 +752,59 @@ class Task2FSM:
             return
 
         target = self.target_route_to_face[self.route_index]
-        self.goto_target(target)
-
-        if self.arrived_target(target):
+        if self.reached_and_hold(target):
             self.stop_motion()
             self.route_index += 1
-
             if self.route_index >= len(self.target_route_to_face):
                 self.set_state("GOTO_SCAN_POINT")
+            return
+
+        if self.arrive_hold_start is None:
+            self.goto_target(target)
 
     def state_goto_scan_point(self):
-        self.goto_target(self.target_scan)
-        if self.arrived_target(self.target_scan):
+        if self.reached_and_hold(self.target_scan):
+            self.stop_motion()
+            self.set_state("HOVER_BEFORE_SCAN")
+            return
+        if self.arrive_hold_start is None:
+            self.goto_target(self.target_scan)
+
+    def state_hover_before_scan(self):
+        self.set_vision(False)
+        self.brake_motion()
+        elapsed = self.state_elapsed()
+
+        if elapsed < self.scan_pre_hover_time:
+            return
+
+        if self.velocity_stable():
+            self.qr = {"found": False, "id": -1, "u": -1.0, "v": -1.0, "area": 0.0}
+            self.qr_stamp = rospy.Time(0)
+            self.stop_motion()
+            self.set_state("SEARCH_QR")
+            return
+
+        if elapsed > self.scan_pre_hover_timeout:
+            rospy.logwarn(
+                "TASK2 scan pre-hover timeout, continue scan. vx=%.3f vy=%.3f vz=%.3f yaw_rate=%.3f",
+                self.vx, self.vy, self.vz, self.yaw_rate
+            )
             self.stop_motion()
             self.set_state("SEARCH_QR")
 
     def state_search_qr(self):
         self.set_vision(True)
+        self.brake_motion()
+
         if self.fresh_qr_found():
             self.stop_motion()
             self.set_state("ALIGN_QR")
             return
+
         if self.state_elapsed() < self.search_timeout:
-            self.small_search_motion()
             return
+
         self.stop_motion()
         self.publish_target_result("FAIL")
         self.route_index = 0
@@ -635,14 +857,15 @@ class Task2FSM:
             return
 
         target = self.target_route_from_face[self.route_index]
-        self.goto_target(target)
-
-        if self.arrived_target(target):
+        if self.reached_and_hold(target):
             self.stop_motion()
             self.route_index += 1
-
             if self.route_index >= len(self.target_route_from_face):
                 self.set_state("LAND")
+            return
+
+        if self.arrive_hold_start is None:
+            self.goto_target(target)
 
     def state_land(self):
         self.set_vision(False)
@@ -667,6 +890,7 @@ class Task2FSM:
     def state_emergency_stop(self):
         self.set_vision(False)
         self.stop_motion()
+        self.publish_stop_to_bridge()
 
 
 if __name__ == "__main__":
