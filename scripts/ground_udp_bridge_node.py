@@ -60,6 +60,13 @@ class GroundUDPBridge:
             queue_size=5
         )  # 任务 2 启动请求，由 mission_manager 仲裁后再发布 /uav/start_task2
 
+        self.task2_target_pub = rospy.Publisher(
+            "/task2/target_id",
+            String,
+            queue_size=5,
+            latch=True
+        )  # 任务 2 指定目标货物编号，给 task2_fsm_node 使用
+
         self.land_pub = rospy.Publisher(
             "/uav/land",
             Bool,
@@ -77,7 +84,14 @@ class GroundUDPBridge:
             String,
             self.fsm_state_callback,
             queue_size=20
-        )  # 订阅 FSM 状态
+        )  # 订阅 FSM1 状态
+
+        rospy.Subscriber(
+            "/fsm2/state",
+            String,
+            self.fsm_state_callback,
+            queue_size=20
+        )  # 订阅 FSM2 状态，统一转成地面站 STATUS
 
         rospy.Subscriber(
             "/inventory/result",
@@ -196,13 +210,38 @@ class GroundUDPBridge:
             # ==================================================================
             return
 
-        if text == "CMD:START_TASK2":  # 启动任务 2：定向盘点
+        if text.startswith("CMD:START_TASK2"):
+            # 启动任务 2：定向盘点。推荐格式：CMD:START_TASK2:<编号>，例如 CMD:START_TASK2:8
+            parts = text.split(":")
+
+            if len(parts) < 3:
+                self.send_udp("REPLY:TASK2_TARGET_REQUIRED")
+                self.send_udp("STATUS:ERROR")
+                return
+
+            try:
+                target_id = int(parts[2])
+            except Exception:
+                self.send_udp("REPLY:TASK2_TARGET_INVALID")
+                self.send_udp("STATUS:ERROR")
+                return
+
+            if target_id < 1 or target_id > 24:
+                self.send_udp("REPLY:TASK2_TARGET_INVALID")
+                self.send_udp("STATUS:ERROR")
+                return
+
             self.task1_running = False
             self.task2_running = True
+            self.latest_target_id = target_id
 
+            self.send_udp("TARGET_ID:{}".format(target_id))
             self.send_udp("REPLY:TASK2_STARTED")
             self.send_udp("STATUS:TASK2_RUNNING")
 
+            # 先发布目标编号，再请求任务仲裁器启动 TASK2
+            self.task2_target_pub.publish(String(data=str(target_id)))
+            time.sleep(0.05)
             self.publish_bool_repeated(self.task2_start_pub, True)
             return
 
