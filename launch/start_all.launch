@@ -35,6 +35,13 @@
     <rosparam file="$(find uav_inventory)/config/requirement1_mission.yaml"
               command="load" />
 
+    <!-- ===============================
+         4.1 加载任务2定点巡查航点参数
+         task2_fsm_node.py 从 /task2_routes 读取
+    ================================ -->
+    <rosparam file="$(find uav_inventory)/config/task2_routes.yaml"
+              command="load" />
+
 
     <!-- ===============================
          5. MAVROS 速度桥
@@ -88,7 +95,24 @@
 
 
     <!-- ===============================
-         8. 地面站 UDP 桥
+         8. 任务 FSM2：第二问定点巡查
+         收到 /uav/start_task2 后启动
+         根据 /task2/target_id 和 inventory_map.json 查目标位置
+         速度输出到 /task2/cmd_vel，由 mission_manager_node 仲裁
+    ================================ -->
+    <node pkg="uav_inventory"
+          type="task2_fsm_node.py"
+          name="task2_fsm_node"
+          output="screen">
+        <param name="odom_topic" value="/mavros/local_position/odom" />
+        <param name="cmd_vel_topic" value="/task2/cmd_vel" />
+        <param name="inventory_map_path"
+               value="$(find uav_inventory)/data/inventory_map.json" />
+    </node>
+
+
+    <!-- ===============================
+         9. 地面站 UDP 桥
          Jetson 监听 8889，地面站监听 8888
          ground_ip 改成你地面站电脑 / 树莓派的实际 IP
     ================================ -->
@@ -107,7 +131,7 @@
 
 
     <!-- ===============================
-         9. 二维码视觉节点
+         10. 二维码视觉节点
     ================================ -->
     <node pkg="uav_inventory"
           type="qr_vision_node.py"
