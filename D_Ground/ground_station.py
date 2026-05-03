@@ -23,6 +23,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
 from ui_view import GroundStationUI
@@ -59,6 +60,11 @@ class MainController:
             drone_port=drone_port
         )
 
+        self.status_ping_timer = QTimer()
+        self.status_ping_timer.setInterval(1500)
+        self.status_ping_timer.timeout.connect(self.send_status_ping)
+        self.status_ping_paused = False
+
         self.bind_ui_signals()
         self.bind_comm_signals()
         QApplication.instance().aboutToQuit.connect(self.close)
@@ -71,6 +77,7 @@ class MainController:
         self.ui.append_log("地面站启动完成")
         self.ui.append_log("当前为 D 题基础框架版")
         self.ui.append_log("等待无人机通信节点上线")
+        self.status_ping_timer.start()
 
     # ==================================================
     # 信号绑定
@@ -111,6 +118,29 @@ class MainController:
     # UI 事件处理
     # ==================================================
 
+    def pause_status_ping(self, reason: str = ""):
+        if self.status_ping_paused:
+            return
+        self.status_ping_paused = True
+        self.status_ping_timer.stop()
+        if reason:
+            self.ui.append_log(f"状态灯刷新已暂停（{reason}）")
+
+    def resume_status_ping(self, reason: str = ""):
+        if not self.status_ping_paused:
+            return
+        self.status_ping_paused = False
+        self.status_ping_timer.start()
+        if reason:
+            self.ui.append_log(f"状态灯刷新已恢复（{reason}）")
+
+    def send_status_ping(self):
+        if self.status_ping_paused:
+            return
+        self.sync_comm_target_from_ui()
+        self.comm.send_data("CMD:PING")
+        self.comm.send_data("CMD:STATUS_PING")
+
     def handle_start_task1(self):
         """
         启动任务1：遍历盘点
@@ -122,6 +152,7 @@ class MainController:
         self.sync_comm_target_from_ui()
         command = "CMD:START_TASK1"
         self.comm.send_data(command)
+        self.pause_status_ping("任务1启动")
 
     def _parse_valid_task2_target_id(self, target_id: str):
         target_text = (target_id or "").strip()
@@ -153,6 +184,7 @@ class MainController:
         self.sync_comm_target_from_ui()
         command = f"CMD:START_TASK2:{target_id}"
         self.comm.send_data(command)
+        self.pause_status_ping("任务2启动")
         self.ui.set_task2_start_enabled(False)
 
     def handle_task2_scan_target(self):
@@ -269,10 +301,12 @@ class MainController:
 
     def reset_state_cache(self):
         self.node_ready_state = {
-            "VISION": False,
             "RECEIVER": False,
-            "FSM": False,
-            "ROS": False,
+            "FSM1": False,
+            "FSM2": False,
+            "VISION": False,
+            "MAVROS": False,
+            "MANAGER": False,
         }
         self.last_task_status = None
         self.last_comm_status = None
@@ -397,23 +431,35 @@ class MainController:
             self.ui.set_ros_launch_enabled(True)
 
         node_status_map = {
-            "VISION_READY": ("VISION", "视觉节点已就绪"),
-            "RECEIVER_READY": ("RECEIVER", "通信接收节点已就绪"),
-            "FSM_READY": ("FSM", "飞控状态机已就绪"),
-            "ROS_READY": ("ROS", "ROS系统启动完成"),
+            "RECEIVER_READY": ("RECEIVER", "接收节点已上线"),
+            "RECEIVER_OFFLINE": ("RECEIVER", "接收节点离线"),
+            "FSM1_READY": ("FSM1", "任务1状态机已上线"),
+            "FSM1_OFFLINE": ("FSM1", "任务1状态机离线"),
+            "FSM2_READY": ("FSM2", "任务2状态机已上线"),
+            "FSM2_OFFLINE": ("FSM2", "任务2状态机离线"),
+            "VISION_READY": ("VISION", "视觉节点已上线"),
+            "VISION_OFFLINE": ("VISION", "视觉节点离线"),
+            "MAVROS_READY": ("MAVROS", "飞控桥已上线"),
+            "MAVROS_OFFLINE": ("MAVROS", "飞控桥离线"),
+            "MANAGER_READY": ("MANAGER", "任务仲裁器已上线"),
+            "MANAGER_OFFLINE": ("MANAGER", "任务仲裁器离线"),
         }
 
         if status_key in node_status_map:
             node_key, log_text = node_status_map[status_key]
-            self.ui.set_node_ready(node_key, True)
-            if node_key == "ROS":
-                self.ui.set_ros_launch_state("ROS已启动")
-            if not self.node_ready_state.get(node_key, False):
-                self.node_ready_state[node_key] = True
-                self.ui.append_log(log_text)
+            is_ready = status_key.endswith("_READY")
+            previous = self.node_ready_state.get(node_key, False)
+            self.ui.set_node_ready(node_key, is_ready)
+            self.node_ready_state[node_key] = is_ready
+            if previous != is_ready:
+                if previous is False and is_ready and status_key.endswith("_READY") and "离线" in log_text:
+                    self.ui.append_log(log_text.replace("离线", "恢复在线"))
+                else:
+                    self.ui.append_log(log_text)
             return
 
         if status_key == "BOOT_WAITING":
+            self.resume_status_ping("系统空闲")
             return
 
         task_status_map = {
@@ -431,6 +477,10 @@ class MainController:
 
         if status_key in task_status_map:
             text = task_status_map[status_key]
+            if status_key in {"TASK1_RUNNING", "TASK2_RUNNING", "TAKEOFF", "MISSION_RUNNING", "SCANNING", "LANDING"}:
+                self.pause_status_ping(f"{text}")
+            if status_key in {"TASK_FINISHED", "MISSION_FINISHED"}:
+                self.resume_status_ping(f"{text}")
             self.ui.set_task_status(text)
             if status_key != self.last_task_status:
                 self.ui.append_log(f"状态：{text}")
@@ -549,6 +599,7 @@ class MainController:
         reply_key = reply.strip().upper()
 
         reply_map = {
+            "PONG": "通信链路正常（PONG）",
             "TASK1_STARTED": "任务1已启动",
             "TASK2_STARTED": "任务二已启动",
             "MISSION_SAVED": "任务数据已保存",
@@ -557,6 +608,8 @@ class MainController:
             "SCAN_OK": "盘点确认成功",
         }
 
+        if reply_key in {"RESET_SENT"}:
+            self.resume_status_ping("收到复位回执")
         text = reply_map.get(reply_key, f"收到回复：{reply}")
 
         self.ui.set_task_status(text)

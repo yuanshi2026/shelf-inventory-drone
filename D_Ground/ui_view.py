@@ -307,8 +307,8 @@ class GroundStationUI(QMainWindow):
         status_panel = self.build_status_panel()
         network_panel = self.build_network_panel()
         
-        status_and_network_layout.addWidget(status_panel, 1)
-        status_and_network_layout.addWidget(network_panel, 1)
+        status_and_network_layout.addWidget(status_panel, 3)
+        status_and_network_layout.addWidget(network_panel, 2)
         
         layout.addLayout(status_and_network_layout)
         
@@ -614,19 +614,27 @@ class GroundStationUI(QMainWindow):
     def build_status_panel(self):
         panel = QFrame()
         panel.setStyleSheet(self.style_sub_panel())
-        panel.setMaximumHeight(96)
+        panel.setMaximumHeight(116)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(4)
 
         node_layout = QGridLayout()
-        node_layout.setSpacing(3)
+        node_layout.setContentsMargins(0, 0, 0, 0)
+        node_layout.setHorizontalSpacing(2)
+        node_layout.setVerticalSpacing(2)
 
-        self.add_node_indicator(node_layout, "视觉", "VISION", 0, 0)
-        self.add_node_indicator(node_layout, "通信", "RECEIVER", 0, 1)
-        self.add_node_indicator(node_layout, "飞控", "FSM", 0, 2)
-        self.add_node_indicator(node_layout, "ROS", "ROS", 0, 3)
+        # 单行六灯：与 UDP 状态保持一致
+        self.add_node_indicator(node_layout, "RECEIVER", "RECEIVER", 0, 0)
+        self.add_node_indicator(node_layout, "FSM1", "FSM1", 0, 1)
+        self.add_node_indicator(node_layout, "FSM2", "FSM2", 0, 2)
+        self.add_node_indicator(node_layout, "VISION", "VISION", 0, 3)
+        self.add_node_indicator(node_layout, "MAVROS", "MAVROS", 0, 4)
+        self.add_node_indicator(node_layout, "MANAGER", "MANAGER", 0, 5)
+
+        for col in range(6):
+            node_layout.setColumnStretch(col, 1)
 
         layout.addLayout(node_layout)
 
