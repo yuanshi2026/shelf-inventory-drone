@@ -309,27 +309,30 @@ class MockDrone:
 
                 print(f"[RX] 来自 {addr}: {message}")
                 self.update_ground_station_target(addr)
+                normalized_message = message
+                while normalized_message.startswith("CMD:CMD:"):
+                    normalized_message = normalized_message[len("CMD:"):]
 
-                if message == "CMD:START_TASK1":
+                if normalized_message == "CMD:START_TASK1":
                     threading.Thread(
                         target=self.run_task1,
                         daemon=True
                     ).start()
 
-                elif message == "CMD:TASK2_SCAN_TARGET":
+                elif normalized_message == "CMD:TASK2_SCAN_TARGET":
                     threading.Thread(
                         target=self.run_task2_scan_target,
                         daemon=True
                     ).start()
 
-                elif message == "CMD:START_TASK2" or message.startswith("CMD:START_TASK2:"):
+                elif normalized_message == "CMD:START_TASK2" or normalized_message.startswith("CMD:START_TASK2:"):
                     # 新协议：CMD:START_TASK2:<target_id>
                     # 兼容旧协议：CMD:START_TASK2
-                    if message.startswith("CMD:START_TASK2:"):
-                        target_id = message[len("CMD:START_TASK2:"):].strip()
+                    if normalized_message.startswith("CMD:START_TASK2:"):
+                        target_id = normalized_message[len("CMD:START_TASK2:"):].strip()
                         if not target_id:
-                            print(f"[WARN] 任务2启动指令格式异常：{message}")
-                            self.send_to_ground(f"REPLY:UNKNOWN_CMD:{message}")
+                            print(f"[WARN] 任务2启动指令格式异常：{normalized_message}")
+                            self.send_to_ground(f"REPLY:UNKNOWN_CMD:{normalized_message}")
                             continue
                         self.task2_target_id = target_id
                         print(f"🎯 收到任务2目标编号：{target_id}")
@@ -339,23 +342,27 @@ class MockDrone:
                         daemon=True
                     ).start()
 
-                elif message == "CMD:PING":
+                elif normalized_message == "CMD:PING":
                     self.send_to_ground("REPLY:PONG")
 
-                elif message == "CMD:LAUNCH":
+                elif normalized_message == "CMD:LAUNCH":
                     threading.Thread(
                         target=self.launch_ros,
                         daemon=True
                     ).start()
 
-                elif message == "CMD:EMERGENCY_STOP":
+                elif normalized_message == "CMD:EMERGENCY_STOP":
                     self.emergency_stop = True
                     self.send_to_ground("STATUS:ERROR")
                     self.send_to_ground("REPLY:EMERGENCY_STOPPED")
 
+                elif normalized_message == "CMD:LAND":
+                    self.send_to_ground("STATUS:LANDING")
+                    self.send_to_ground("REPLY:LANDING")
+
                 else:
-                    print(f"[WARN] 未识别指令：{message}")
-                    self.send_to_ground(f"REPLY:UNKNOWN_CMD:{message}")
+                    print(f"[WARN] 未识别指令：{normalized_message}")
+                    self.send_to_ground(f"REPLY:UNKNOWN_CMD:{normalized_message}")
 
             except KeyboardInterrupt:
                 self.running = False
