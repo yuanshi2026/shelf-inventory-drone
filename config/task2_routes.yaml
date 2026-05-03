@@ -6,8 +6,13 @@
 task2_routes:
   use_relative: true
 
-  # 起飞高度，参考任务1保持 1.50m 附近
+  # 起飞高度，参考任务1保持 1.50m 附近。
+  # 这里的 z / takeoff_height 统一理解为“相机中心目标离地高度”。
   takeoff_height: 1.50
+
+  # 相机起飞前离地高度，单位 m。
+  # 任务2 FSM 会把 home_z 减去这个值，使相机中心对准 YAML 中填写的高度。
+  camera_initial_height: 0.15
 
   arrive_pos_eps: 0.15
   arrive_z_eps: 0.10
