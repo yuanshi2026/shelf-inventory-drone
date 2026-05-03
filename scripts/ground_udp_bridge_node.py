@@ -121,13 +121,7 @@ class GroundUDPBridge:
             daemon=True
         )  # UDP 接收线程
 
-        self.heartbeat_thread = threading.Thread(
-            target=self.heartbeat_loop,
-            daemon=True
-        )  # 状态心跳线程
-
         self.recv_thread.start()
-        self.heartbeat_thread.start()
 
         rospy.loginfo("ground_udp_bridge_node started.")
         rospy.loginfo("UAV listen UDP: %s:%d", self.local_ip, self.local_port)
@@ -176,24 +170,6 @@ class GroundUDPBridge:
             except Exception as e:
                 if self.running:  # 非主动关闭时才打印异常
                     rospy.logwarn("UDP receive failed: %s", str(e))
-
-    def heartbeat_loop(self):
-        """周期性发送无人机节点状态。"""
-
-        while self.running and not rospy.is_shutdown():  # 节点运行时持续发送状态
-            self.send_udp("STATUS:RECEIVER_READY")
-            time.sleep(0.05)
-
-            self.send_udp("STATUS:FSM_READY")
-            time.sleep(0.05)
-
-            self.send_udp("STATUS:VISION_READY")
-            time.sleep(0.05)
-
-            if not self.task1_running and not self.task2_running:  # 未执行任务时等待启动
-                self.send_udp("STATUS:BOOT_WAITING")
-
-            time.sleep(self.heartbeat_interval)
 
     def parse_task2_target_id(self, text):
         prefix = "CMD:START_TASK2:"
@@ -285,6 +261,19 @@ class GroundUDPBridge:
             # ====================【本次安全修改 2026-05-03 3】地面站复位按钮转发 /uav/reset ====================
             self.publish_bool_repeated(self.reset_pub, True)
             # =================================================================================
+            return
+
+        if text == "CMD:STATUS_PING":
+            if self.task1_running or self.task2_running:
+                self.send_udp("REPLY:BUSY")
+                return
+            self.send_udp("STATUS:RECEIVER_READY")
+            self.send_udp("STATUS:FSM1_READY")
+            self.send_udp("STATUS:FSM2_READY")
+            self.send_udp("STATUS:VISION_READY")
+            self.send_udp("STATUS:MAVROS_READY")
+            self.send_udp("STATUS:MANAGER_READY")
+            self.send_udp("STATUS:BOOT_WAITING")
             return
 
         if text == "CMD:PING":  # 通信测试指令
