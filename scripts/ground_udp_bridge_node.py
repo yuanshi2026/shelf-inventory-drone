@@ -7,6 +7,7 @@ import threading
 import time
 
 import rospy
+import rosnode
 from std_msgs.msg import Bool, String
 
 
@@ -121,7 +122,13 @@ class GroundUDPBridge:
             daemon=True
         )  # UDP 接收线程
 
+        self.heartbeat_thread = threading.Thread(
+            target=self.heartbeat_loop,
+            daemon=True
+        )
+
         self.recv_thread.start()
+        self.heartbeat_thread.start()
 
         rospy.loginfo("ground_udp_bridge_node started.")
         rospy.loginfo("UAV listen UDP: %s:%d", self.local_ip, self.local_port)
@@ -170,6 +177,64 @@ class GroundUDPBridge:
             except Exception as e:
                 if self.running:  # 非主动关闭时才打印异常
                     rospy.logwarn("UDP receive failed: %s", str(e))
+
+
+    def heartbeat_loop(self):
+        """周期性发送待命状态。
+
+        节点 READY/OFFLINE 不再写死周期发送，改为收到
+        CMD:STATUS_PING 后实时检测 ROS 节点并回复。
+        任务运行中不发送节点状态，避免影响 SCAN / TARGET_RESULT。
+        """
+
+        while self.running and not rospy.is_shutdown():
+            if not self.task1_running and not self.task2_running:
+                self.send_udp("STATUS:BOOT_WAITING")
+
+            time.sleep(self.heartbeat_interval)
+
+    def get_ros_nodes(self):
+        """从 ROS master 获取当前在线节点列表。"""
+        try:
+            return set(rosnode.get_node_names())
+        except Exception as e:
+            rospy.logwarn("Get ROS node list failed: %s", str(e))
+            return set()
+
+    def node_online(self, node_names, candidates):
+        """判断候选节点名中是否有任意一个在线。"""
+        for name in candidates:
+            if name in node_names:
+                return True
+        return False
+
+    def send_node_status_snapshot(self):
+        """向地面站发送一次真实节点状态快照。
+
+        只在空闲时响应 CMD:STATUS_PING。任务运行中不回节点状态，
+        避免刷屏和干扰任务结果回传。
+        """
+        if self.task1_running or self.task2_running:
+            self.send_udp("REPLY:BUSY")
+            return
+
+        nodes = self.get_ros_nodes()
+
+        status_map = {
+            "RECEIVER": True,
+            "FSM1": self.node_online(nodes, ["/requirement1_fsm_node"]),
+            "FSM2": self.node_online(nodes, ["/task2_fsm_node"]),
+            "VISION": self.node_online(nodes, ["/qr_vision_node"]),
+            "MAVROS": self.node_online(nodes, ["/mavros_sitl_bridge"]),
+            "MANAGER": self.node_online(nodes, ["/mission_manager_node"]),
+        }
+
+        for key in ["RECEIVER", "FSM1", "FSM2", "VISION", "MAVROS", "MANAGER"]:
+            if status_map[key]:
+                self.send_udp("STATUS:%s_READY" % key)
+            else:
+                self.send_udp("STATUS:%s_OFFLINE" % key)
+            time.sleep(0.02)
 
     def parse_task2_target_id(self, text):
         prefix = "CMD:START_TASK2:"
@@ -264,16 +329,7 @@ class GroundUDPBridge:
             return
 
         if text == "CMD:STATUS_PING":
-            if self.task1_running or self.task2_running:
-                self.send_udp("REPLY:BUSY")
-                return
-            self.send_udp("STATUS:RECEIVER_READY")
-            self.send_udp("STATUS:FSM1_READY")
-            self.send_udp("STATUS:FSM2_READY")
-            self.send_udp("STATUS:VISION_READY")
-            self.send_udp("STATUS:MAVROS_READY")
-            self.send_udp("STATUS:MANAGER_READY")
-            self.send_udp("STATUS:BOOT_WAITING")
+            self.send_node_status_snapshot()
             return
 
         if text == "CMD:PING":  # 通信测试指令
