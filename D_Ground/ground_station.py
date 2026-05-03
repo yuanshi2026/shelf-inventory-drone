@@ -315,6 +315,7 @@ class MainController:
         self.drone_ip_seen = None
         self.drone_last_seen = None
         self.user_ip_applied = False
+        self.ros_launch_success = False
 
     def sync_comm_target_from_ui(self):
         drone_ip = self.ui.ip_input.text().strip() or "192.168.151.102"
@@ -413,6 +414,8 @@ class MainController:
         self.ui.set_comm_status(text)
         self.last_comm_status = text
         if text.startswith("已发送："):
+            if self.ros_launch_success and text in {"已发送：CMD:PING", "已发送：CMD:STATUS_PING"}:
+                return
             self.ui.append_log(text)
 
     def handle_status(self, status: str):
@@ -431,6 +434,7 @@ class MainController:
             self.ui.set_ros_launch_enabled(True)
 
         node_status_map = {
+            "ROS_READY": (None, "ROS 已启动成功"),
             "RECEIVER_READY": ("RECEIVER", "接收节点已上线"),
             "RECEIVER_OFFLINE": ("RECEIVER", "接收节点离线"),
             "FSM1_READY": ("FSM1", "任务1状态机已上线"),
@@ -447,6 +451,13 @@ class MainController:
 
         if status_key in node_status_map:
             node_key, log_text = node_status_map[status_key]
+            if status_key == "ROS_READY":
+                if not self.ros_launch_success:
+                    self.ros_launch_success = True
+                    self.ui.set_ros_launch_state("已启动")
+                    self.ui.append_log(log_text)
+                return
+
             is_ready = status_key.endswith("_READY")
             previous = self.node_ready_state.get(node_key, False)
             self.ui.set_node_ready(node_key, is_ready)
@@ -600,6 +611,7 @@ class MainController:
 
         reply_map = {
             "PONG": "通信链路正常（PONG）",
+            "LAUNCH_OK": "ROS 已启动成功",
             "TASK1_STARTED": "任务1已启动",
             "TASK2_STARTED": "任务二已启动",
             "MISSION_SAVED": "任务数据已保存",
@@ -610,6 +622,9 @@ class MainController:
 
         if reply_key in {"RESET_SENT"}:
             self.resume_status_ping("收到复位回执")
+        if reply_key == "LAUNCH_OK" and not self.ros_launch_success:
+            self.ros_launch_success = True
+            self.ui.set_ros_launch_state("已启动")
         text = reply_map.get(reply_key, f"收到回复：{reply}")
 
         self.ui.set_task_status(text)
