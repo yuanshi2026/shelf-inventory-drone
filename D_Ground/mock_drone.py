@@ -84,6 +84,14 @@ class MockDrone:
         self.ground_station_port = GROUND_STATION_PORT
         self.task1_coords = build_d_task1_coords()
         self.task1_scan_map = {}
+        self.status_ready_messages = [
+            "STATUS:RECEIVER_READY",
+            "STATUS:FSM1_READY",
+            "STATUS:FSM2_READY",
+            "STATUS:VISION_READY",
+            "STATUS:MAVROS_READY",
+            "STATUS:MANAGER_READY",
+        ]
 
         print("========================================")
         print("🚁 D题 Mock Drone 已启动")
@@ -135,6 +143,12 @@ class MockDrone:
                 self.send_to_ground("STATUS:BOOT_WAITING")
             time.sleep(HEARTBEAT_INTERVAL)
 
+    def send_startup_status_snapshot(self):
+        self.send_to_ground("STATUS:ROS_READY")
+        for status in self.status_ready_messages:
+            self.send_to_ground(status)
+            time.sleep(0.05)
+
     # =========================
     # 一键启动 ROS
     # =========================
@@ -149,13 +163,7 @@ class MockDrone:
             self.send_to_ground("REPLY:LAUNCH_OK")
             time.sleep(0.2)
 
-            self.send_to_ground("STATUS:RECEIVER_READY")
-            time.sleep(0.2)
-            self.send_to_ground("STATUS:VISION_READY")
-            time.sleep(0.2)
-            self.send_to_ground("STATUS:FSM_READY")
-            time.sleep(0.2)
-            self.send_to_ground("STATUS:ROS_READY")
+            self.send_startup_status_snapshot()
 
             self.ros_launched = True
         finally:
@@ -345,6 +353,9 @@ class MockDrone:
                 elif normalized_message == "CMD:PING":
                     self.send_to_ground("REPLY:PONG")
 
+                elif normalized_message == "CMD:STATUS_PING":
+                    self.send_startup_status_snapshot()
+
                 elif normalized_message == "CMD:LAUNCH":
                     threading.Thread(
                         target=self.launch_ros,
@@ -381,6 +392,11 @@ class MockDrone:
                 target=self.heartbeat_loop,
                 daemon=True
             ).start()
+
+        threading.Thread(
+            target=self.send_startup_status_snapshot,
+            daemon=True
+        ).start()
 
         self.recv_loop()
 
