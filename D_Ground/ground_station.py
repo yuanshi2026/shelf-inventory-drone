@@ -703,6 +703,10 @@ class MainController:
         if self._should_filter_ping_unknown_reply(reply_key):
             return
 
+        if reply_key == "PONG":
+            # 状态心跳回执会高频出现，避免持续刷屏日志/状态栏。
+            return
+
         reply_map = {
             "LAUNCH_OK": "ROS 已启动成功",
             "TASK1_STARTED": "任务1已启动",
