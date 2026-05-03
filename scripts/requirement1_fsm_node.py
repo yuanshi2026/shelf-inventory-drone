@@ -144,6 +144,16 @@ class Requirement1FSM:
         self.scan_no_qr_policy = str(
             self.mission.get("scan_no_qr_policy", "fail_continue")
         ) # fail_continue：无二维码记 FAIL；fake_ok：无二维码也生成演示 OK
+
+        # ====================【稳定悬停增强 2026-05-03】扫码前先停稳，再开始识别 ====================
+        # scan_pre_hover_time：进入扫描点后先纯悬停刹车的最短时间，不开视觉、不做对准。
+        # scan_pre_hover_timeout：如果里程计速度噪声导致一直不满足稳定阈值，最多等待这么久后继续。
+        # settle_*：用于判断飞机是否真的停稳，而不是只进入了位置误差圈。
+        self.scan_pre_hover_time = float(self.mission.get("scan_pre_hover_time", 2.0))
+        self.scan_pre_hover_timeout = float(self.mission.get("scan_pre_hover_timeout", 3.0))
+        self.settle_vel_xy_eps = float(self.mission.get("settle_vel_xy_eps", 0.05))
+        self.settle_vel_z_eps = float(self.mission.get("settle_vel_z_eps", 0.04))
+        self.settle_yaw_rate_eps = float(self.mission.get("settle_yaw_rate_eps", 0.12))
         # =================================================================================
 
         # ====================【新增】正常任务结束降落参数 ====================
@@ -177,6 +187,16 @@ class Requirement1FSM:
             String,
             queue_size=20
         ) # FSM 状态发布器
+
+        # ====================【稳定悬停增强 2026-05-03】任务1补上视觉使能控制 ====================
+        # qr_vision_node 默认 vision_enabled=False；任务1不发布 /vision/enable 时，真二维码识别不会工作。
+        # 这里只在 SEARCH_QR / ALIGN_QR 阶段打开视觉，其余阶段关闭，减少误触发和视觉微调造成的晃动。
+        self.vision_enable_pub = rospy.Publisher(
+            "/vision/enable",
+            Bool,
+            queue_size=5
+        )
+        # =================================================================================
 
         # ====================【新增】正常任务完成后请求 mavros_sitl_bridge 自动降落/上锁 ====================
         self.land_pub = rospy.Publisher(
@@ -266,6 +286,13 @@ class Requirement1FSM:
         self.z = 0.0                 # 当前高度
         self.yaw = 0.0               # 当前偏航角
 
+        # ====================【稳定悬停增强 2026-05-03】保存里程计速度，用于判断是否真正停稳 ====================
+        self.vx = 0.0                # 当前 local x 方向速度
+        self.vy = 0.0                # 当前 local y 方向速度
+        self.vz = 0.0                # 当前 z 方向速度
+        self.yaw_rate = 0.0          # 当前偏航角速度
+        # =================================================================================
+
         self.home_set = False        # 是否已记录起飞点
         self.home_x = 0.0            # 起飞点 x
         self.home_y = 0.0            # 起飞点 y
@@ -333,6 +360,14 @@ class Requirement1FSM:
         self.y = position.y
         self.z = position.z
         self.yaw = yaw_from_quaternion(orientation)
+
+        # ====================【稳定悬停增强 2026-05-03】读取 Odometry 中的速度 ====================
+        # 注意：/mavros/local_position/odom 通常会提供 twist，用它判断是否真正停稳。
+        self.vx = msg.twist.twist.linear.x
+        self.vy = msg.twist.twist.linear.y
+        self.vz = msg.twist.twist.linear.z
+        self.yaw_rate = msg.twist.twist.angular.z
+        # =================================================================================
 
         self.current_pose_ok = True
 
@@ -461,6 +496,10 @@ class Requirement1FSM:
         """保存地面站 ACK 编号。"""
         self.last_ack_id = msg.data.strip()
 
+    def set_vision(self, enabled):
+        """打开或关闭二维码视觉识别。"""
+        self.vision_enable_pub.publish(Bool(data=bool(enabled)))
+
     def land_status_callback(self, msg):
         """保存 bridge 回传的降落状态，例如 WAIT_LANDED、LANDED、DISARMED。"""
         self.land_status = msg.data.strip()
@@ -489,6 +528,13 @@ class Requirement1FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
+
+        # ====================【稳定悬停增强 2026-05-03】只在真正识别/对准阶段打开视觉 ====================
+        if new_state in ["SEARCH_QR", "ALIGN_QR"]:
+            self.set_vision(True)
+        else:
+            self.set_vision(False)
+        # =================================================================================
 
         # ====================【实飞稳定修改 2026-05-03】进入新目标状态时重置到点稳定计时 ====================
         if new_state in ["TAKEOFF", "GOTO_MISSION_POINT", "RETURN_LAND"]:
@@ -755,6 +801,17 @@ class Requirement1FSM:
             abs(eyaw) < self.arrive_yaw_eps
         )
 
+    def velocity_stable(self):
+        """判断无人机速度是否已经足够小，避免带速度进入扫码阶段。"""
+
+        vel_xy = math.sqrt(self.vx * self.vx + self.vy * self.vy)
+
+        return (
+            vel_xy < self.settle_vel_xy_eps and
+            abs(self.vz) < self.settle_vel_z_eps and
+            abs(self.yaw_rate) < self.settle_yaw_rate_eps
+        )
+
     def publish_body_velocity(self, vx_body, vy_body, vz, yaw_rate):
         """将机体系速度转换到 local 坐标后发布。"""
 
@@ -911,6 +968,9 @@ class Requirement1FSM:
             elif self.state == "GOTO_MISSION_POINT":  # 飞向航点
                 self.state_goto_mission_point()
 
+            elif self.state == "HOVER_BEFORE_SCAN":  # 扫码前先停稳
+                self.state_hover_before_scan()
+
             elif self.state == "SEARCH_QR":  # 搜索二维码
                 self.state_search_qr()
 
@@ -1000,31 +1060,63 @@ class Requirement1FSM:
             self.set_state("GOTO_MISSION_POINT")
             return
 
-        if point_type == "scan":  # 扫码点到达后开始搜索二维码
+        if point_type == "scan":  # 扫码点到达后先停稳，再开始搜索二维码
             self.current_scan_point = raw_point
-            self.set_state("SEARCH_QR")
+            self.set_state("HOVER_BEFORE_SCAN")
             return
 
         rospy.logwarn("Unknown point type: %s", point_type)
         self.current_index += 1
         self.set_state("GOTO_MISSION_POINT")
 
-    def state_search_qr(self):
-        """SEARCH_QR：到达扫描点后原地悬停 2 秒，不再移动搜索。"""
+    def state_hover_before_scan(self):
+        """HOVER_BEFORE_SCAN：进入扫码点后先纯悬停，等机体真的停稳再打开视觉。"""
 
-        # ====================【实飞稳定修改 2026-05-03】取消搜索动作，改为扫描点悬停 ====================
-        # 这里不再调用 small_search_motion()，因此不会再有：
-        #   1. 向左/向右横移；
-        #   2. 向上/向下微动；
-        #   3. 因没有二维码而每个扫描点都晃一圈。
-        self.brake_motion()
+        self.set_vision(False)   # 停稳阶段不识别，避免视觉结果提前触发对准动作
+        self.brake_motion()      # 只发平滑零速度，不做小搜索、不做视觉对准
 
-        if self.state_elapsed() < self.scan_hover_time:  # 到达扫描点后固定悬停等待 2 秒
+        elapsed = self.state_elapsed()
+
+        if elapsed < self.scan_pre_hover_time:  # 至少悬停 scan_pre_hover_time 秒
             return
 
-        if self.fresh_qr_found():  # 后续接入真二维码时，悬停结束后仍可进入视觉对准
+        if self.velocity_stable():  # 速度也足够小，才正式开始扫码
+            self.qr = {
+                "found": False,
+                "id": -1,
+                "u": -1.0,
+                "v": -1.0,
+                "area": 0.0
+            }
+            self.qr_stamp = rospy.Time(0)
+            self.stop_motion()
+            self.set_state("SEARCH_QR")
+            return
+
+        if elapsed > self.scan_pre_hover_timeout:  # 防止里程计速度噪声导致永久卡住
+            rospy.logwarn(
+                "Scan pre-hover timeout, continue scan. vx=%.3f vy=%.3f vz=%.3f yaw_rate=%.3f",
+                self.vx,
+                self.vy,
+                self.vz,
+                self.yaw_rate
+            )
+            self.stop_motion()
+            self.set_state("SEARCH_QR")
+
+    def state_search_qr(self):
+        """SEARCH_QR：正式扫码阶段，只原地等待二维码，不再移动搜索。"""
+
+        # ====================【稳定悬停增强 2026-05-03】正式扫码，不做任何搜索运动 ====================
+        self.set_vision(True)
+        self.brake_motion()
+
+        if self.fresh_qr_found():  # 一旦识别到新鲜二维码，进入对准/点亮流程
             self.stop_motion()
             self.set_state("ALIGN_QR")
+            return
+
+        if self.state_elapsed() < self.search_timeout:  # 未超时则继续原地等待
             return
 
         self.stop_motion()
@@ -1048,6 +1140,8 @@ class Requirement1FSM:
 
     def state_align_qr(self):
         """ALIGN_QR：对准二维码。"""
+
+        self.set_vision(True)
 
         if not self.fresh_qr_found():  # 二维码丢失则重新搜索
             self.stop_motion()
