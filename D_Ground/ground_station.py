@@ -704,7 +704,6 @@ class MainController:
             return
 
         reply_map = {
-            "PONG": "通信链路正常（PONG）",
             "LAUNCH_OK": "ROS 已启动成功",
             "TASK1_STARTED": "任务1已启动",
             "TASK2_STARTED": "任务二已启动",
