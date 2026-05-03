@@ -1,0 +1,73 @@
+# task2_routes.yaml
+# 需要在 start_all.launch 中用 <rosparam file="$(find uav_inventory)/config/task2_routes.yaml" command="load" /> 导入。
+# 坐标含义与 FSM1 类似：use_relative=true 时，x/y/z 是相对起飞点 local 坐标偏移，yaw 直接使用 YAML 中的 yaw。
+
+task2_routes:
+  use_relative: true
+  takeoff_height: 0.7
+
+  arrive_pos_eps: 0.15
+  arrive_z_eps: 0.10
+  arrive_yaw_eps_deg: 10.0
+
+  kp_xy: 0.35
+  kp_z: 0.35
+  kp_yaw: 0.50
+  max_vel_xy: 0.15
+  max_vel_z: 0.08
+  max_yaw_rate: 0.30
+
+  # 848x480 时中心大约是 424,240；如果激光点/相机中心不同再改。
+  laser_u: 424.0
+  laser_v: 240.0
+  align_pixel_eps: 25.0
+  align_kp_u: 0.0008
+  align_kp_v: 0.0008
+  max_align_vel_y: 0.08
+  max_align_vel_z: 0.06
+
+  search_timeout: 3.0
+  align_timeout: 4.0
+  verify_timeout: 1.0
+  qr_fresh_timeout: 0.8
+  land_finish_timeout: 45.0
+
+  # 降落点上方，示例值，按实际场地修改。
+  land: {x: 0.0, y: 0.0, z: 0.5, yaw: 0.0}
+
+  # 每个面的安全接近点，示例值，按实际场地修改。
+  approach:
+    A: {x: 0.8, y: 0.0, z: 0.7, yaw: 0.0}
+    B: {x: 0.8, y: 0.0, z: 0.7, yaw: 3.14}
+    C: {x: 1.8, y: 0.0, z: 0.7, yaw: 0.0}
+    D: {x: 1.8, y: 0.0, z: 0.7, yaw: 3.14}
+
+  # A1~D6 的大致扫码点，下面全是占位示例，必须按你们实测场地坐标改。
+  scan_points:
+    A1: {x: 1.0, y: -0.50, z: 0.55, yaw: 0.0}
+    A2: {x: 1.0, y: -0.30, z: 0.55, yaw: 0.0}
+    A3: {x: 1.0, y: -0.10, z: 0.70, yaw: 0.0}
+    A4: {x: 1.0, y:  0.10, z: 0.70, yaw: 0.0}
+    A5: {x: 1.0, y:  0.30, z: 0.85, yaw: 0.0}
+    A6: {x: 1.0, y:  0.50, z: 0.85, yaw: 0.0}
+
+    B1: {x: 1.0, y:  0.50, z: 0.55, yaw: 3.14}
+    B2: {x: 1.0, y:  0.30, z: 0.55, yaw: 3.14}
+    B3: {x: 1.0, y:  0.10, z: 0.70, yaw: 3.14}
+    B4: {x: 1.0, y: -0.10, z: 0.70, yaw: 3.14}
+    B5: {x: 1.0, y: -0.30, z: 0.85, yaw: 3.14}
+    B6: {x: 1.0, y: -0.50, z: 0.85, yaw: 3.14}
+
+    C1: {x: 2.0, y: -0.50, z: 0.55, yaw: 0.0}
+    C2: {x: 2.0, y: -0.30, z: 0.55, yaw: 0.0}
+    C3: {x: 2.0, y: -0.10, z: 0.70, yaw: 0.0}
+    C4: {x: 2.0, y:  0.10, z: 0.70, yaw: 0.0}
+    C5: {x: 2.0, y:  0.30, z: 0.85, yaw: 0.0}
+    C6: {x: 2.0, y:  0.50, z: 0.85, yaw: 0.0}
+
+    D1: {x: 2.0, y:  0.50, z: 0.55, yaw: 3.14}
+    D2: {x: 2.0, y:  0.30, z: 0.55, yaw: 3.14}
+    D3: {x: 2.0, y:  0.10, z: 0.70, yaw: 3.14}
+    D4: {x: 2.0, y: -0.10, z: 0.70, yaw: 3.14}
+    D5: {x: 2.0, y: -0.30, z: 0.85, yaw: 3.14}
+    D6: {x: 2.0, y: -0.50, z: 0.85, yaw: 3.14}
