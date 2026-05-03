@@ -154,7 +154,12 @@ class RouteMapWidget(QWidget):
     def _draw_route(self, painter, field):
         start = self._start_point(field)
         land = self._land_point(field)
-        scan_point = self._entry_point(field, self.target_coord[0])
+
+        target_x, target_y = self._coord_point(field, self.target_coord)
+        entry_x, _ = self._entry_point(field, self.target_coord[0])
+
+        # 扫描位只取货架面的入口 X，Y 与目标二维码保持同高，避免出现无意义的中途停留感
+        scan_point = (entry_x, target_y)
 
         _, top, _, _ = field
         safe_y = top + 40
