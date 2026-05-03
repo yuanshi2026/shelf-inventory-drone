@@ -122,14 +122,28 @@ class MainController:
         self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:START_TASK1")
 
+    def _parse_valid_task2_target_id(self, target_id: str):
+        target_text = (target_id or "").strip()
+        if not target_text:
+            return None
+        if not target_text.isdigit():
+            return None
+
+        target_number = int(target_text)
+        if target_number < 1 or target_number > 24:
+            return None
+
+        return str(target_number)
+
     def handle_start_task2(self):
         """
         启动任务二：定点盘点
         """
-        target_id = (self.task2_target_id or "").strip()
+        target_id = self._parse_valid_task2_target_id(self.task2_target_id)
         if not target_id:
-            self.ui.append_log("任务二启动失败：尚未识别目标编号（请先执行任务2.1）")
-            self.ui.set_task_status("任务二启动失败：缺少目标编号")
+            self.ui.append_log("任务二启动失败：目标编号无效（请先执行任务2.1并确保编号在1~24）")
+            self.ui.set_task_status("任务二启动失败：目标编号无效")
+            self.ui.set_task2_start_enabled(False)
             return
 
         self.ui.append_log("按钮：启动任务二定点盘点")
@@ -480,11 +494,20 @@ class MainController:
         TARGET_ID:17
         """
         item_id = item_id.strip()
+        valid_target_id = self._parse_valid_task2_target_id(item_id)
 
-        self.task2_target_id = item_id or None
-        self.ui.set_target_info(f"目标编号：{item_id}")
+        if not valid_target_id:
+            self.task2_target_id = None
+            self.ui.set_target_info(f"目标编号无效：{item_id or '空'}")
+            self.ui.set_task_status("目标识别失败：编号无效")
+            self.ui.append_log(f"任务二目标识别失败：非法编号 {item_id or '空'}")
+            self.ui.set_task2_start_enabled(False)
+            return
+
+        self.task2_target_id = valid_target_id
+        self.ui.set_target_info(f"目标编号：{valid_target_id}")
         self.ui.set_task_status("目标识别完成，等待人员撤离后启动定点盘点")
-        self.ui.append_log(f"任务二目标识别完成：编号 {item_id}")
+        self.ui.append_log(f"任务二目标识别完成：编号 {valid_target_id}")
         self.ui.set_task2_start_enabled(True)
 
     def handle_target_result(self, coord: str, item_id: str, result: str):
