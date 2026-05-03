@@ -120,7 +120,9 @@ class MainController:
         self.ui.set_task_status("已发送任务1启动指令")
 
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:START_TASK1")
+        command = "CMD:START_TASK1"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
 
     def _parse_valid_task2_target_id(self, target_id: str):
         target_text = (target_id or "").strip()
@@ -150,7 +152,9 @@ class MainController:
         self.ui.set_task_status("已发送任务二定点盘点启动指令")
 
         self.sync_comm_target_from_ui()
-        self.comm.send_data(f"CMD:START_TASK2:{target_id}")
+        command = f"CMD:START_TASK2:{target_id}"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
         self.ui.set_task2_start_enabled(False)
 
     def handle_task2_scan_target(self):
@@ -161,19 +165,25 @@ class MainController:
         self.ui.set_task_status("已发送任务二目标识别指令")
 
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:TASK2_SCAN_TARGET")
+        command = "CMD:TASK2_SCAN_TARGET"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
 
     def handle_stop(self):
         self.ui.append_log("已发送刹停指令")
         self.ui.set_task_status("已发送刹停指令")
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:EMERGENCY_STOP")
+        command = "CMD:EMERGENCY_STOP"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
 
     def handle_land(self):
         self.ui.append_log("已发送降落指令")
         self.ui.set_task_status("已发送降落指令")
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:LAND")
+        command = "CMD:LAND"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
 
     def handle_show_route_map(self):
         """
@@ -195,7 +205,9 @@ class MainController:
         self.ui.append_log("已发送ROS启动指令，等待机载端响应……")
         self.ui.set_ros_launch_state("启动中...")
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:LAUNCH")
+        command = "CMD:LAUNCH"
+        self.comm.send_data(command)
+        self.ui.append_log(f"已发送：{command}")
 
     def handle_query(self, item_id: str):
         """
