@@ -305,10 +305,10 @@ class GroundUDPBridge:
         elif state == "TAKEOFF":  # 正在起飞
             self.send_udp("STATUS:TAKEOFF")
 
-        elif state == "GOTO_MISSION_POINT":  # 正在执行航线
+        elif state in ["GOTO_MISSION_POINT", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT"]:  # 正在执行航线
             self.send_udp("STATUS:MISSION_RUNNING")
 
-        elif state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:  # 正在扫描
+        elif state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT", "VERIFY_TARGET"]:  # 正在扫描/核验
             self.send_udp("STATUS:SCANNING")
 
         elif state == "NEXT_POINT":  # 当前点完成，进入下一点
@@ -317,7 +317,7 @@ class GroundUDPBridge:
             elif self.task2_running:
                 self.send_udp("STATUS:TASK2_RUNNING")
 
-        elif state in ["RETURN_LAND", "LAND"]:  # 正在降落
+        elif state in ["RETURN_LAND", "RETURN_ROUTE", "LAND"]:  # 正在返航/降落
             self.send_udp("STATUS:LANDING")
 
         elif state == "FINISH":  # 任务完成
