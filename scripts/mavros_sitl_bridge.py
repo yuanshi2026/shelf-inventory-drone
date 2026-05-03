@@ -36,6 +36,14 @@ class MavrosSITLBridge:
         self.start_requested = False             # 是否允许进入 OFFBOARD 并解锁
         self.stop_requested = False              # 是否收到急停/停止请求
 
+        # ====================【本次安全修改 2026-05-03 1】急停悬停锁存状态 ====================
+        # abort_latched 一旦置 True，bridge 不再自动切 OFFBOARD、不再自动解锁、不再转发旧速度。
+        # /uav/stop 现在只表示“紧急悬停锁存”，不会直接停桨，也不会自动继续旧任务。
+        # 只有收到 /uav/reset=True 且飞机已经上锁后，才允许清除锁存并重新开始任务。
+        self.abort_latched = False               # 急停锁存标志
+        self.abort_reason = ""                   # 急停原因，便于终端排查
+        # =================================================================================
+
         # ====================【新增】正常任务结束降落/上锁状态变量 ====================
         # land_requested：收到 /uav/land 后置 True，bridge 负责切 AUTO.LAND。
         # disarm_requested：落地后置 True，bridge 负责调用 /mavros/cmd/arming false。
@@ -84,6 +92,15 @@ class MavrosSITLBridge:
             self.stop_callback,
             queue_size=5
         )  # 订阅急停/停止信号
+
+        # ====================【本次修改-安全 2】人工复位入口 ====================
+        rospy.Subscriber(
+            "/uav/reset",
+            Bool,
+            self.reset_callback,
+            queue_size=5
+        )  # 急停后必须人工复位，才允许再次启动
+        # ====================================================================
 
         # ====================【新增】正常结束控制话题，不再复用 /uav/stop ====================
         rospy.Subscriber(
@@ -134,8 +151,31 @@ class MavrosSITLBridge:
         rospy.loginfo("mavros_sitl_bridge started.")
 
     def state_callback(self, msg):
-        """保存 MAVROS 当前状态。"""
+        """保存 MAVROS 当前状态，并检测飞行中异常退出。"""
+        prev_armed = self.current_state.armed        # 上一帧是否 armed
+        prev_mode = self.current_state.mode          # 上一帧飞行模式
         self.current_state = msg
+
+        # ====================【本次修改-安全 3】检测 kill / 退出 OFFBOARD ====================
+        # 如果任务执行中突然 disarm，常见原因是遥控器 kill 或飞控保护触发。
+        # 如果任务执行中突然退出 OFFBOARD，说明外部控制链路已不可靠。
+        # 这两种情况都必须锁死，避免 kill 解除后自动重新 arm 并冲向旧航点。
+        active_control = (
+            self.start_requested and
+            not self.land_requested and
+            not self.disarm_requested and
+            not self.stop_requested and
+            not self.abort_latched
+        )
+
+        if active_control and prev_armed and not msg.armed:  # 飞行中突然上锁/kill
+            self.trigger_abort("armed changed True -> False during mission")
+            return
+
+        if active_control and prev_mode == "OFFBOARD" and msg.mode != "OFFBOARD":  # 飞行中退出 OFFBOARD
+            self.trigger_abort("mode changed OFFBOARD -> %s during mission" % msg.mode)
+            return
+        # =====================================================================
 
     def extended_state_callback(self, msg):
         """保存 MAVROS 扩展状态，主要用于判断 PX4 是否确认落地。"""
@@ -144,12 +184,35 @@ class MavrosSITLBridge:
 
     def cmd_callback(self, msg):
         """保存 FSM 最新速度指令。"""
+        # ====================【本次修改-安全 4】急停/降落时不再缓存任务速度 ====================
+        # 否则 kill 解除后，bridge 可能继续转发 FSM 为旧航点计算出来的新速度。
+        if (
+            self.abort_latched or
+            self.stop_requested or
+            self.land_requested or
+            self.disarm_requested or
+            not self.start_requested
+        ):
+            self.last_cmd = self.zero_cmd()
+            self.last_cmd_time = rospy.Time.now()
+            return
+        # =====================================================================
+
         self.last_cmd = msg
         self.last_cmd_time = rospy.Time.now()
 
     def start_callback(self, msg):
         """收到一键启动后，允许切 OFFBOARD 并解锁。"""
         if msg.data:  # 收到 True 才启动
+            # ====================【本次修改-安全 5】急停锁存后禁止直接重启 ====================
+            if self.abort_latched:
+                rospy.logerr(
+                    "Start ignored: abort_latched=True, reason=%s. Publish /uav/reset after disarmed first.",
+                    self.abort_reason
+                )
+                return
+            # =====================================================================
+
             rospy.loginfo("Start requested.")
             self.start_requested = True
             self.stop_requested = False
@@ -157,32 +220,81 @@ class MavrosSITLBridge:
             # ====================【新增】新任务开始时清除上一次降落/上锁请求 ====================
             self.land_requested = False
             self.disarm_requested = False
+            self.last_cmd = self.zero_cmd()
+            self.last_cmd_time = rospy.Time.now()
             self.publish_land_status("IDLE")
             # =====================================================================
 
     def stop_callback(self, msg):
-        """收到急停/停止信号后，走 AUTO.LAND，而不是直接 disarm。"""
+        """收到急停信号后，进入悬停锁存；不继续任务，也不直接降落/停桨。"""
         if msg.data:  # 收到 True 才停止
-            rospy.logwarn("Stop requested. Switch to AUTO.LAND, then disarm after landed.")
-            self.start_requested = False
-            self.stop_requested = True
-
-            # ====================【新增】急停也不直接上锁，先降落，再等 landed_state ====================
-            self.land_requested = True
+            # ====================【本次安全修改 2026-05-03 2】/uav/stop 改为紧急悬停锁存 ====================
+            # 旧逻辑：/uav/stop 后立刻设置 land_requested=True，马上尝试 AUTO.LAND。
+            # 新逻辑：/uav/stop 只锁死旧任务并持续发布零速度，让飞机先悬停刹住。
+            # 后续由人工确认安全后，通过 /uav/land 或手动接管完成降落；落地上锁后再 /uav/reset。
+            self.trigger_abort("/uav/stop received, emergency hover latched")
+            self.land_requested = False
             self.disarm_requested = False
-            self.publish_land_status("LAND_REQUESTED_BY_STOP")
-            # ===========================================================================
+            self.publish_land_status("ABORT_HOVER")
+            # =====================================================================================
+
+    # ====================【本次安全修改 2026-05-03 3】急停锁存与人工复位 ====================
+    def trigger_abort(self, reason):
+        """进入急停悬停锁存：停止旧任务、清零速度、禁止自动 OFFBOARD/ARM。"""
+        if not self.abort_latched:  # 第一次进入急停时打印原因
+            rospy.logerr("ABORT HOVER LATCHED: %s", reason)
+
+        self.abort_latched = True
+        self.abort_reason = reason
+        self.start_requested = False
+        self.stop_requested = True
+        self.land_requested = False
+        self.disarm_requested = False
+        self.last_cmd = self.zero_cmd()
+        self.last_cmd_time = rospy.Time.now()
+        self.vel_pub.publish(self.zero_cmd())
+        self.publish_land_status("ABORT_HOVER")
+
+    def reset_callback(self, msg):
+        """急停后人工复位；只有已经上锁时才允许清除 abort_latched。"""
+        if not msg.data:  # 只响应 True
+            return
+
+        # ====================【本次安全修改 2026-05-03 4】复位必须在已上锁后生效 ====================
+        # 这里把规则写死：飞机仍 armed 时拒绝 reset，避免空中清状态后再次 start 造成危险。
+        if self.current_state.armed:  # 飞机还 armed 时禁止复位
+            rospy.logerr("Reset rejected: vehicle is still armed. Land/disarm first, then move back to start point.")
+            self.publish_land_status("RESET_REJECTED_ARMED")
+            return
+        # =====================================================================================
+
+        rospy.logwarn("Abort reset accepted. Bridge returns to IDLE.")
+        self.abort_latched = False
+        self.abort_reason = ""
+        self.start_requested = False
+        self.stop_requested = False
+        self.land_requested = False
+        self.disarm_requested = False
+        self.last_cmd = self.zero_cmd()
+        self.last_cmd_time = rospy.Time.now()
+        self.publish_land_status("IDLE")
+    # ========================================================================
 
     # ====================【新增】/uav/land 正常任务结束降落入口 ====================
     def land_callback(self, msg):
-        """FSM 正常任务完成后，请求 PX4 进入 AUTO.LAND。"""
+        """请求 PX4 进入 AUTO.LAND；正常完成和急停悬停后都可以使用。"""
         if msg.data:  # 收到 True 才执行降落流程
+            # ====================【本次安全修改 2026-05-03 5】急停后允许人工触发安全降落 ====================
+            # 如果已经处于 ABORT_HOVER，这里不会恢复旧任务，只是从悬停锁存转入 AUTO.LAND。
             rospy.logwarn("/uav/land received. Switch PX4 to AUTO.LAND.")
             self.start_requested = False
             self.stop_requested = False
             self.land_requested = True
             self.disarm_requested = False
+            self.last_cmd = self.zero_cmd()
+            self.last_cmd_time = rospy.Time.now()
             self.publish_land_status("LAND_REQUESTED")
+            # =================================================================================
     # ========================================================================
 
     # ====================【新增】/uav/disarm 安全上锁入口 ====================
@@ -346,16 +458,24 @@ class MavrosSITLBridge:
     # ==================================================================
 
     def run(self):
-        """主循环：飞行时转发速度 setpoint；结束时执行 AUTO.LAND + DISARM。"""
+        """主循环：飞行时转发速度 setpoint；急停时悬停锁存，降落时执行 AUTO.LAND + DISARM。"""
         rate = rospy.Rate(self.rate_hz)  # 控制循环频率
 
         while not rospy.is_shutdown():  # ROS 未关闭时持续运行
-            # ====================【新增】降落/上锁流程优先级最高 ====================
-            if self.land_requested or self.disarm_requested or self.stop_requested:
+            # ====================【本次安全修改 2026-05-03 6】主循环优先级重排 ====================
+            # 1. /uav/land 或 /uav/disarm：进入 AUTO.LAND + 落地后上锁流程。
+            # 2. abort_latched 或 stop_requested：只发布零速度悬停锁存，不自动降落、不恢复旧任务。
+            # 3. start_requested：正常 OFFBOARD/ARM/速度转发。
+            if self.land_requested or self.disarm_requested:
                 self.handle_land_and_disarm()
                 rate.sleep()
                 continue
-            # ================================================================
+
+            if self.abort_latched or self.stop_requested:
+                self.vel_pub.publish(self.zero_cmd())
+                rate.sleep()
+                continue
+            # =================================================================================
 
             if self.start_requested:  # 启动后进入 OFFBOARD 控制流程
                 self.try_enter_offboard_and_arm()

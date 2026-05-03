@@ -33,23 +33,45 @@ class GroundUDPBridge:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.local_ip, self.local_port))
 
+        # 任务仲裁器适配：UDP 桥不再直接启动 FSM/bridge，先把请求交给 mission_manager
         self.start_pub = rospy.Publisher(
             "/uav/request_task1",
             Bool,
             queue_size=5
-        )  # 任务 1 启动话题
+        )  # 任务 1 启动请求，由 mission_manager 仲裁后再发布 /uav/start
 
         self.stop_pub = rospy.Publisher(
             "/uav/request_stop",
             Bool,
             queue_size=5
-        )  # 紧急停止话题
+        )  # 紧急停止请求，由 mission_manager 仲裁后再发布 /uav/stop
+
+        # ====================【本次安全修改 2026-05-03 1】地面站复位指令对应 ROS /uav/reset ====================
+        self.reset_pub = rospy.Publisher(
+            "/uav/reset",
+            Bool,
+            queue_size=5
+        )  # 急停落地上锁并搬回起飞点后，人工复位任务状态
+        # =========================================================================================
 
         self.task2_start_pub = rospy.Publisher(
             "/uav/request_task2",
             Bool,
             queue_size=5
-        )  # 任务 2 启动话题，后续任务 2 FSM 可订阅
+        )  # 任务 2 启动请求，由 mission_manager 仲裁后再发布 /uav/start_task2
+
+        self.task2_target_pub = rospy.Publisher(
+            "/task2/target_id",
+            String,
+            queue_size=5,
+            latch=True
+        )  # 任务 2 指定目标货物编号，给 task2_fsm_node 使用
+
+        self.land_pub = rospy.Publisher(
+            "/uav/land",
+            Bool,
+            queue_size=5
+        )  # e6 MAVROS 桥：急停悬停后，人工确认安全降落
 
         self.target_scan_pub = rospy.Publisher(
             "/uav/scan_target",
@@ -62,7 +84,14 @@ class GroundUDPBridge:
             String,
             self.fsm_state_callback,
             queue_size=20
-        )  # 订阅 FSM 状态
+        )  # 订阅 FSM1 状态
+
+        rospy.Subscriber(
+            "/fsm2/state",
+            String,
+            self.fsm_state_callback,
+            queue_size=20
+        )  # 订阅 FSM2 状态，统一转成地面站 STATUS
 
         rospy.Subscriber(
             "/inventory/result",
@@ -206,11 +235,16 @@ class GroundUDPBridge:
             self.latest_target_id = target_id
             self.task1_running = False
             self.task2_running = True
+            self.latest_target_id = target_id
 
+            self.send_udp("TARGET_ID:{}".format(target_id))
             self.send_udp("REPLY:TASK2_STARTED")
             self.send_udp("STATUS:TASK2_RUNNING")
 
-            self.task2_start_pub.publish(Bool(data=True))
+            # 先发布目标编号，再请求任务仲裁器启动 TASK2
+            self.task2_target_pub.publish(String(data=str(target_id)))
+            time.sleep(0.05)
+            self.publish_bool_repeated(self.task2_start_pub, True)
             return
 
         if text == "CMD:TASK2_SCAN_TARGET":  # 任务 2 起飞前扫描抽取二维码
@@ -218,16 +252,39 @@ class GroundUDPBridge:
             self.target_scan_pub.publish(Bool(data=True))
             return
 
-        if text == "CMD:EMERGENCY_STOP":  # 紧急停止
+        if text == "CMD:EMERGENCY_STOP":  # 紧急停止：悬停锁存，不再继续旧任务
             self.task1_running = False
             self.task2_running = False
 
             self.send_udp("STATUS:ERROR")
             self.send_udp("REPLY:EMERGENCY_STOP_OK")
 
-            # ==================== 本次修改 3：停止指令重复发布 ====================
+            # ====================【本次安全修改 2026-05-03 2】紧急停止改为悬停锁存 ====================
+            # 这里仍然发布 /uav/stop，但 ROS 端语义已经是“紧急悬停锁存”，不是直接停桨。
             self.publish_bool_repeated(self.stop_pub, True)
-            # ==================================================================
+            # ================================================================================
+            return
+
+        if text == "CMD:LAND":  # 安全降落：急停悬停后，人工确认安全再请求 AUTO.LAND
+            self.task1_running = False
+            self.task2_running = False
+
+            self.send_udp("STATUS:LANDING")
+            self.send_udp("REPLY:LAND_REQUESTED")
+
+            self.publish_bool_repeated(self.land_pub, True)
+            return
+
+        if text == "CMD:RESET":  # 人工复位：必须在无人机已降落、已上锁、搬回起飞点后使用
+            self.task1_running = False
+            self.task2_running = False
+
+            self.send_udp("STATUS:BOOT_WAITING")
+            self.send_udp("REPLY:RESET_SENT")
+
+            # ====================【本次安全修改 2026-05-03 3】地面站复位按钮转发 /uav/reset ====================
+            self.publish_bool_repeated(self.reset_pub, True)
+            # =================================================================================
             return
 
         if text == "CMD:PING":  # 通信测试指令

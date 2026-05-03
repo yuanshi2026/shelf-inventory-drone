@@ -47,7 +47,8 @@ class GroundStationUI(QMainWindow):
     network_changed = pyqtSignal(int, str, int)
     clear_log_requested = pyqtSignal()
     reset_requested = pyqtSignal()
-    emergency_stop_clicked = pyqtSignal()
+    stop_clicked = pyqtSignal()
+    land_clicked = pyqtSignal()
     route_map_clicked = pyqtSignal()
 
     def __init__(self):
@@ -735,7 +736,8 @@ class GroundStationUI(QMainWindow):
         self.ros_launch_btn = QPushButton("一键启动ROS")
         self.clear_log_btn = QPushButton("清空日志")
         self.reset_btn = QPushButton("全局复位")
-        self.emergency_stop_btn = QPushButton("紧急刹停")
+        self.stop_btn = QPushButton("刹停")
+        self.land_btn = QPushButton("降落")
 
         buttons = [
             self.ros_launch_btn,
@@ -744,7 +746,8 @@ class GroundStationUI(QMainWindow):
             self.task2_start_btn,
             self.clear_log_btn,
             self.reset_btn,
-            self.emergency_stop_btn,
+            self.stop_btn,
+            self.land_btn,
         ]
 
         for btn in buttons:
@@ -757,7 +760,8 @@ class GroundStationUI(QMainWindow):
         self.ros_launch_btn.setStyleSheet(self.style_bottom_gray())
         self.clear_log_btn.setStyleSheet(self.style_bottom_gray())
         self.reset_btn.setStyleSheet(self.style_bottom_red())
-        self.emergency_stop_btn.setStyleSheet(self.style_bottom_red())
+        self.stop_btn.setStyleSheet(self.style_bottom_red())
+        self.land_btn.setStyleSheet(self.style_bottom_red())
 
         self.ros_launch_btn.clicked.connect(self.ros_launch_clicked.emit)
         self.task1_btn.clicked.connect(self.task1_clicked.emit)
@@ -765,7 +769,8 @@ class GroundStationUI(QMainWindow):
         self.task2_start_btn.clicked.connect(self.task2_start_clicked.emit)
         self.clear_log_btn.clicked.connect(self.clear_log_requested.emit)
         self.reset_btn.clicked.connect(self.reset_requested.emit)
-        self.emergency_stop_btn.clicked.connect(self.emergency_stop_clicked.emit)
+        self.stop_btn.clicked.connect(self.stop_clicked.emit)
+        self.land_btn.clicked.connect(self.land_clicked.emit)
 
         layout.addWidget(self.ros_launch_btn, 0, 0, 1, 2)
         layout.addWidget(self.task1_btn, 1, 0, 1, 2)
@@ -773,7 +778,8 @@ class GroundStationUI(QMainWindow):
         layout.addWidget(self.task2_start_btn, 2, 1)
         layout.addWidget(self.clear_log_btn, 3, 0)
         layout.addWidget(self.reset_btn, 3, 1)
-        layout.addWidget(self.emergency_stop_btn, 4, 0, 1, 2)
+        layout.addWidget(self.stop_btn, 4, 0)
+        layout.addWidget(self.land_btn, 4, 1)
 
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)

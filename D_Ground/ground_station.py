@@ -88,7 +88,8 @@ class MainController:
         self.ui.network_changed.connect(self.handle_network_changed)
         self.ui.clear_log_requested.connect(self.handle_clear_log)
         self.ui.reset_requested.connect(self.handle_reset_all)
-        self.ui.emergency_stop_clicked.connect(self.handle_emergency_stop)
+        self.ui.stop_clicked.connect(self.handle_stop)
+        self.ui.land_clicked.connect(self.handle_land)
         self.ui.route_map_clicked.connect(self.handle_show_route_map)
 
     def bind_comm_signals(self):
@@ -162,11 +163,17 @@ class MainController:
         self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:TASK2_SCAN_TARGET")
 
-    def handle_emergency_stop(self):
-        self.ui.append_log("按钮：紧急刹停")
-        self.ui.set_task_status("已发送紧急刹停指令")
+    def handle_stop(self):
+        self.ui.append_log("已发送刹停指令")
+        self.ui.set_task_status("已发送刹停指令")
         self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:EMERGENCY_STOP")
+
+    def handle_land(self):
+        self.ui.append_log("已发送降落指令")
+        self.ui.set_task_status("已发送降落指令")
+        self.sync_comm_target_from_ui()
+        self.comm.send_data("CMD:LAND")
 
     def handle_show_route_map(self):
         """
