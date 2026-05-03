@@ -88,6 +88,40 @@ class Requirement1FSM:
         self.max_vel_z = float(self.mission.get("max_vel_z", 0.15))         # 最大竖直速度
         self.max_yaw_rate = float(self.mission.get("max_yaw_rate", 0.40))   # 最大偏航角速度
 
+        # ====================【实飞稳定修改 2026-05-03】速度规划与限加速度参数 ====================
+        # 说明：
+        #   原来的 goto_target() 是简单 P 控制，误差一大速度立刻打满，到点后又立刻切零，
+        #   真机上容易出现冲、晃、刹不住。
+        #
+        #   新控制逻辑采用“距离限速 + 指令限加速度”：
+        #       1. 离目标远时允许接近最大速度；
+        #       2. 离目标近时按刹车距离自动降速；
+        #       3. 每一帧速度变化量受 max_acc_* 限制，避免速度突变。
+        self.max_acc_xy = float(self.mission.get("max_acc_xy", 0.18))       # 水平方向最大速度变化率，单位 m/s^2
+        self.max_acc_z = float(self.mission.get("max_acc_z", 0.12))         # 竖直方向最大速度变化率，单位 m/s^2
+        self.max_acc_yaw = float(self.mission.get("max_acc_yaw", 0.35))     # 偏航角速度最大变化率，单位 rad/s^2
+
+        self.min_slow_distance_xy = float(
+            self.mission.get("min_slow_distance_xy", 0.20)
+        ) # 水平距离小于该值附近时明显减速，避免到点冲过
+
+        self.min_slow_distance_z = float(
+            self.mission.get("min_slow_distance_z", 0.15)
+        ) # 高度误差小于该值附近时明显减速
+
+        self.yaw_first_threshold = math.radians(
+            float(self.mission.get("yaw_first_threshold_deg", 18.0))
+        ) # 偏航误差大于该角度时，优先原地转向，减少边转边飘
+
+        self.arrive_hold_time = float(
+            self.mission.get("arrive_hold_time", 0.40)
+        ) # 到达航点后稳定等待时间，单位 s
+
+        self.arrive_hold_start = None       # 到达阈值后的稳定计时起点
+        self.smooth_cmd = Twist()           # 上一次限加速度后的速度指令
+        self.last_control_time = rospy.Time.now() # 上一次速度规划更新时间
+        # =================================================================================
+
         self.laser_u = float(self.mission.get("laser_u", 320.0)) # 激光点图像横坐标
         self.laser_v = float(self.mission.get("laser_v", 240.0)) # 激光点图像纵坐标
         self.align_pixel_eps = float(self.mission.get("align_pixel_eps", 25.0)) # 对准像素阈值
@@ -101,6 +135,16 @@ class Requirement1FSM:
         self.align_timeout = float(self.mission.get("align_timeout", 4.0))         # 对准二维码超时时间
         self.laser_flash_time = float(self.mission.get("laser_flash_time", 0.5))   # 激光点亮时间
         self.ack_timeout = float(self.mission.get("ack_timeout", 0.4))             # 等待 ACK 时间
+
+        # ====================【实飞稳定修改 2026-05-03】扫描点只悬停，不再移动搜索 ====================
+        # 到达 scan 点后，FSM 只悬停 scan_hover_time 秒。
+        # 没有真二维码/假二维码时，悬停结束后记录 FAIL 并继续下一个点。
+        # 这样不会再执行横移、反向横移、上移、下移等搜索动作。
+        self.scan_hover_time = float(self.mission.get("scan_hover_time", 2.0)) # 扫描点悬停等待时间
+        self.scan_no_qr_policy = str(
+            self.mission.get("scan_no_qr_policy", "fail_continue")
+        ) # fail_continue：无二维码记 FAIL；fake_ok：无二维码也生成演示 OK
+        # =================================================================================
 
         # ====================【新增】正常任务结束降落参数 ====================
         # land_finish_timeout：FSM 在 LAND 状态等待 bridge 完成 AUTO.LAND + DISARM 的最长时间。
@@ -405,6 +449,9 @@ class Requirement1FSM:
         }
         self.qr_stamp = rospy.Time(0)
         self.home_set = False
+        self.arrive_hold_start = None
+        self.smooth_cmd = Twist()
+        self.last_control_time = rospy.Time.now()
         self.stop_motion()
         self.laser_off()
         self.set_state("IDLE")
@@ -442,14 +489,104 @@ class Requirement1FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
+
+        # ====================【实飞稳定修改 2026-05-03】进入新目标状态时重置到点稳定计时 ====================
+        if new_state in ["TAKEOFF", "GOTO_MISSION_POINT", "RETURN_LAND"]:
+            self.arrive_hold_start = None
+        # =================================================================================
     #===========================================================================================================================    
     def state_elapsed(self):
         """返回当前状态已经持续的时间。"""
         return (rospy.Time.now() - self.state_enter_time).to_sec()
 
     def stop_motion(self):
-        """发布零速度。"""
+        """立即发布零速度。
+
+        说明：
+            该函数用于急停、结束、降落、激光照射等必须立刻清零速度的场景。
+            普通到点刹车不要调用它，而是调用 brake_motion()，这样速度会按限加速度平滑归零。
+        """
+        self.smooth_cmd = Twist()
+        self.last_control_time = rospy.Time.now()
         self.cmd_pub.publish(Twist())
+
+    # ====================【实飞稳定修改 2026-05-03】速度规划基础函数 ====================
+    def limit_step(self, target_value, current_value, max_delta):
+        """限制单次速度变化量，避免速度指令突然跳变。"""
+
+        delta = target_value - current_value
+
+        if delta > max_delta:  # 增量过大时，只允许增加 max_delta
+            return current_value + max_delta
+
+        if delta < -max_delta:  # 减量过大时，只允许减少 max_delta
+            return current_value - max_delta
+
+        return target_value
+
+    def publish_smooth_cmd(self, target_cmd):
+        """发布经过限加速度处理后的速度指令。"""
+
+        now = rospy.Time.now()
+        dt = (now - self.last_control_time).to_sec()
+
+        if dt <= 0.0 or dt > 0.20:  # 时间异常或循环卡顿时，按 30Hz 估算
+            dt = 1.0 / 30.0
+
+        self.last_control_time = now
+
+        max_dxy = self.max_acc_xy * dt       # 本周期水平速度最多允许变化量
+        max_dz = self.max_acc_z * dt         # 本周期竖直速度最多允许变化量
+        max_dyaw = self.max_acc_yaw * dt     # 本周期偏航角速度最多允许变化量
+
+        self.smooth_cmd.linear.x = self.limit_step(
+            target_cmd.linear.x,
+            self.smooth_cmd.linear.x,
+            max_dxy
+        )
+
+        self.smooth_cmd.linear.y = self.limit_step(
+            target_cmd.linear.y,
+            self.smooth_cmd.linear.y,
+            max_dxy
+        )
+
+        self.smooth_cmd.linear.z = self.limit_step(
+            target_cmd.linear.z,
+            self.smooth_cmd.linear.z,
+            max_dz
+        )
+
+        self.smooth_cmd.angular.z = self.limit_step(
+            target_cmd.angular.z,
+            self.smooth_cmd.angular.z,
+            max_dyaw
+        )
+
+        self.cmd_pub.publish(self.smooth_cmd)
+
+    def brake_motion(self):
+        """平滑刹车，用于普通到点后的稳定等待。"""
+        self.publish_smooth_cmd(Twist())
+
+    def distance_limited_speed(self, error_abs, max_speed, max_acc, slow_distance):
+        """根据剩余距离计算目标速度大小。
+
+        逻辑：
+            距离较远时速度接近 max_speed；
+            距离较近时用线性降速和 sqrt(2*a*s) 双重约束，
+            让无人机接近航点时提前变慢，而不是冲进阈值后突然刹车。
+        """
+
+        if error_abs <= 0.0:  # 没有误差时速度为 0
+            return 0.0
+
+        slow_distance = max(slow_distance, 1e-3)
+        ratio_speed = max_speed * min(1.0, error_abs / slow_distance)
+        brake_speed = math.sqrt(max(0.0, 2.0 * max_acc * error_abs))
+
+        return min(max_speed, ratio_speed, brake_speed)
+    # =================================================================================
 
     def laser_on(self):
         """打开激光。"""
@@ -545,21 +682,62 @@ class Requirement1FSM:
         return self.resolve_point(self.land_point)
 
     def goto_target(self, target):
-        """使用 P 控制飞向目标点。"""
+        """使用“距离限速 + 限加速度”的方式飞向目标点。
+
+        与旧 P 控制的区别：
+            旧逻辑直接 cmd = kp * error，误差大时速度突然打满；
+            新逻辑先根据剩余距离规划目标速度，再用 publish_smooth_cmd() 限制速度变化率，
+            因此起步、刹车、切航点都会更平滑。
+        """
 
         ex = target["x"] - self.x
         ey = target["y"] - self.y
         ez = target["z"] - self.z
         eyaw = normalize_angle(target["yaw"] - self.yaw)
 
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
         cmd = Twist()
 
-        cmd.linear.x = clamp(self.kp_xy * ex, -self.max_vel_xy, self.max_vel_xy)
-        cmd.linear.y = clamp(self.kp_xy * ey, -self.max_vel_xy, self.max_vel_xy)
-        cmd.linear.z = clamp(self.kp_z * ez, -self.max_vel_z, self.max_vel_z)
-        cmd.angular.z = clamp(self.kp_yaw * eyaw, -self.max_yaw_rate, self.max_yaw_rate)
+        yaw_speed = self.distance_limited_speed(
+            abs(eyaw),
+            self.max_yaw_rate,
+            self.max_acc_yaw,
+            math.radians(8.0)
+        )
+        cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
 
-        self.cmd_pub.publish(cmd)
+        # 偏航误差较大时先转向，水平速度置零，避免无人机边转边斜着飘。
+        if abs(eyaw) > self.yaw_first_threshold:
+            z_speed = self.distance_limited_speed(
+                abs(ez),
+                self.max_vel_z,
+                self.max_acc_z,
+                self.min_slow_distance_z
+            )
+            cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+            self.publish_smooth_cmd(cmd)
+            return
+
+        if horizontal_error > 1e-4:  # 有水平误差时，沿误差方向生成速度向量
+            xy_speed = self.distance_limited_speed(
+                horizontal_error,
+                self.max_vel_xy,
+                self.max_acc_xy,
+                self.min_slow_distance_xy
+            )
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        z_speed = self.distance_limited_speed(
+            abs(ez),
+            self.max_vel_z,
+            self.max_acc_z,
+            self.min_slow_distance_z
+        )
+        cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+
+        self.publish_smooth_cmd(cmd)
 
     def arrived_target(self, target):
         """判断是否到达目标点。"""
@@ -592,7 +770,35 @@ class Requirement1FSM:
         cmd.linear.z = vz
         cmd.angular.z = yaw_rate
 
-        self.cmd_pub.publish(cmd)
+        self.publish_smooth_cmd(cmd)
+
+    # ====================【实飞稳定修改 2026-05-03】到点后稳定等待 ====================
+    def reached_and_hold(self, target):
+        """判断是否到达目标，并在目标附近稳定等待 arrive_hold_time。
+
+        返回 True：
+            已经进入到达阈值，并且稳定等待时间满足要求。
+
+        返回 False：
+            尚未到达，或者刚到达但还没有稳定够 0.4 秒。
+        """
+
+        if not self.arrived_target(target):  # 还没进入到达阈值，继续正常飞行
+            self.arrive_hold_start = None
+            return False
+
+        self.brake_motion()  # 进入到达阈值后先平滑刹车，不立刻切状态
+
+        if self.arrive_hold_start is None:
+            self.arrive_hold_start = rospy.Time.now()
+            return False
+
+        if rospy.Time.now() - self.arrive_hold_start < rospy.Duration(self.arrive_hold_time):
+            return False
+
+        self.arrive_hold_start = None
+        return True
+    # =================================================================================
 
     def fresh_qr_found(self):
         """判断是否有新鲜有效二维码结果。"""
@@ -636,21 +842,12 @@ class Requirement1FSM:
         )
 
     def small_search_motion(self):
-        """二维码未出现时做小范围搜索。"""
+        """二维码搜索动作已取消。
 
-        t = self.state_elapsed()
-
-        if t < 1.0:  # 先向一侧搜索
-            self.publish_body_velocity(0.0, 0.04, 0.0, 0.0)
-
-        elif t < 2.0:  # 再向另一侧搜索
-            self.publish_body_velocity(0.0, -0.04, 0.0, 0.0)
-
-        elif t < 2.5:  # 再稍微上移
-            self.publish_body_velocity(0.0, 0.0, 0.03, 0.0)
-
-        else:  # 最后稍微下移
-            self.publish_body_velocity(0.0, 0.0, -0.03, 0.0)
+        保留这个函数名是为了兼容旧代码，但现在不会再发布横移/升降速度。
+        真二维码稳定接入前，扫描点只悬停，不主动找码。
+        """
+        self.brake_motion()
 
     def publish_inventory_result(self, status):
         """发布当前扫码点的盘点结果。"""
@@ -770,11 +967,14 @@ class Requirement1FSM:
         """TAKEOFF：起飞到指定高度。"""
 
         target = self.make_takeoff_target()
-        self.goto_target(target)
 
-        if self.arrived_target(target):  # 到达起飞高度后进入任务航点
+        if self.reached_and_hold(target):  # 起飞高度稳定 0.4 秒后再进入任务航点
             self.stop_motion()
             self.set_state("GOTO_MISSION_POINT")
+            return
+
+        if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
+            self.goto_target(target)
 
     def state_goto_mission_point(self):
         """GOTO_MISSION_POINT：飞到当前任务点。"""
@@ -786,9 +986,9 @@ class Requirement1FSM:
         raw_point = self.points[self.current_index]
         target = self.resolve_point(raw_point)
 
-        self.goto_target(target)
-
-        if not self.arrived_target(target):  # 未到达则继续飞
+        if not self.reached_and_hold(target):  # 未到达或刚到点未稳定够 0.4 秒
+            if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
+                self.goto_target(target)
             return
 
         self.stop_motion()
@@ -810,21 +1010,41 @@ class Requirement1FSM:
         self.set_state("GOTO_MISSION_POINT")
 
     def state_search_qr(self):
-        """SEARCH_QR：搜索二维码。"""
+        """SEARCH_QR：到达扫描点后原地悬停 2 秒，不再移动搜索。"""
 
-        if self.fresh_qr_found():  # 找到二维码后进入对准
+        # ====================【实飞稳定修改 2026-05-03】取消搜索动作，改为扫描点悬停 ====================
+        # 这里不再调用 small_search_motion()，因此不会再有：
+        #   1. 向左/向右横移；
+        #   2. 向上/向下微动；
+        #   3. 因没有二维码而每个扫描点都晃一圈。
+        self.brake_motion()
+
+        if self.state_elapsed() < self.scan_hover_time:  # 到达扫描点后固定悬停等待 2 秒
+            return
+
+        if self.fresh_qr_found():  # 后续接入真二维码时，悬停结束后仍可进入视觉对准
             self.stop_motion()
             self.set_state("ALIGN_QR")
             return
 
-        if self.state_elapsed() < self.search_timeout:  # 未超时时继续小范围搜索
-            self.small_search_motion()
-            return
-
-        rospy.logwarn("QR search timeout.")
         self.stop_motion()
-        self.publish_inventory_result(status="FAIL")
+
+        if self.scan_no_qr_policy == "fake_ok":  # 仅用于演示：无二维码也生成一个假结果
+            fake_id = (self.current_index % 24) + 1
+            self.qr = {
+                "found": True,
+                "id": fake_id,
+                "u": self.laser_u,
+                "v": self.laser_v,
+                "area": 4000.0
+            }
+            self.qr_stamp = rospy.Time.now()
+            self.publish_inventory_result(status="OK")
+        else:
+            self.publish_inventory_result(status="FAIL")
+
         self.set_state("NEXT_POINT")
+        # =================================================================================
 
     def state_align_qr(self):
         """ALIGN_QR：对准二维码。"""
@@ -891,11 +1111,14 @@ class Requirement1FSM:
         """RETURN_LAND：飞到降落点上方。"""
 
         target = self.make_land_target()
-        self.goto_target(target)
 
-        if self.arrived_target(target):  # 到达降落点上方后开始下降
+        if self.reached_and_hold(target):  # 降落点上方稳定 0.4 秒后再请求 AUTO.LAND
             self.stop_motion()
             self.set_state("LAND")
+            return
+
+        if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
+            self.goto_target(target)
 
     def state_land(self):
         """LAND：请求 mavros_sitl_bridge 切 AUTO.LAND，并等待真正落地上锁。"""
