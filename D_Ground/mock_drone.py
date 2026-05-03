@@ -102,6 +102,22 @@ class MockDrone:
         print("========================================\n")
 
     # =========================
+    # 日志过滤
+    # =========================
+
+    def should_log_rx(self, message: str) -> bool:
+        normalized = (message or "").strip().upper()
+        return normalized not in {"CMD:PING", "CMD:STATUS_PING"}
+
+    def should_log_tx(self, message: str) -> bool:
+        normalized = (message or "").strip().upper()
+        if normalized == "REPLY:PONG":
+            return False
+        if normalized.startswith("STATUS:") and normalized.endswith("_READY"):
+            return False
+        return True
+
+    # =========================
     # UDP 发送
     # =========================
 
@@ -113,7 +129,8 @@ class MockDrone:
             message.encode("utf-8"),
             (self.ground_station_ip, self.ground_station_port)
         )
-        print(f"[TX] {message}")
+        if self.should_log_tx(message):
+            print(f"[TX] {message}")
 
     def update_ground_station_target(self, addr):
         """
@@ -315,7 +332,8 @@ class MockDrone:
                 if not message:
                     continue
 
-                print(f"[RX] 来自 {addr}: {message}")
+                if self.should_log_rx(message):
+                    print(f"[RX] 来自 {addr}: {message}")
                 self.update_ground_station_target(addr)
                 normalized_message = message
                 while normalized_message.startswith("CMD:CMD:"):
@@ -354,7 +372,10 @@ class MockDrone:
                     self.send_to_ground("REPLY:PONG")
 
                 elif normalized_message == "CMD:STATUS_PING":
-                    self.send_startup_status_snapshot()
+                    if self.ros_launched:
+                        self.send_startup_status_snapshot()
+                    else:
+                        self.send_to_ground("STATUS:BOOT_WAITING")
 
                 elif normalized_message == "CMD:LAUNCH":
                     threading.Thread(

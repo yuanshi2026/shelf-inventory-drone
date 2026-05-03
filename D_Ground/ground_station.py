@@ -77,7 +77,7 @@ class MainController:
         self.ui.append_log("地面站启动完成")
         self.ui.append_log("当前为 D 题基础框架版")
         self.ui.append_log("等待无人机通信节点上线")
-        self.status_ping_timer.start()
+        # 启动后先不主动轮询，避免在未启动机载节点时刷屏
 
     # ==================================================
     # 信号绑定
@@ -130,12 +130,14 @@ class MainController:
         if not self.status_ping_paused:
             return
         self.status_ping_paused = False
-        self.status_ping_timer.start()
+        if self.ros_launch_success:
+            self.status_ping_timer.start()
         if reason:
             self.ui.append_log(f"状态灯刷新已恢复（{reason}）")
 
     def send_status_ping(self):
-        if self.status_ping_paused:
+        # 仅在机载 ROS 已启动后执行轮询，避免无意义 PING/STATUS_PING 刷屏
+        if self.status_ping_paused or not self.ros_launch_success:
             return
         self.sync_comm_target_from_ui()
         self.comm.send_data("CMD:PING")
@@ -628,6 +630,8 @@ class MainController:
         if reply_key == "LAUNCH_OK" and not self.ros_launch_success:
             self.ros_launch_success = True
             self.ui.set_ros_launch_state("已启动")
+            if not self.status_ping_paused:
+                self.status_ping_timer.start()
         text = reply_map.get(reply_key, f"收到回复：{reply}")
 
         self.ui.set_task_status(text)
