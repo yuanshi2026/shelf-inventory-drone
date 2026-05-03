@@ -38,10 +38,19 @@ mission:
   max_align_vel_z: 0.08
 
   # 超时与激光点亮时间
-  search_timeout: 3.0
   align_timeout: 4.0
   laser_flash_time: 0.5
   ack_timeout: 0.4
+
+  # 扫码点稳定参数：不降低巡航速度，只是在扫码前确认机体停稳
+  scan_pre_hover_time: 2.0
+  scan_pre_hover_timeout: 3.0
+  settle_vel_xy_eps: 0.05
+  settle_vel_z_eps: 0.04
+  settle_yaw_rate_eps: 0.12
+
+  # 正式扫码等待时长；此阶段只原地等待二维码，不做横移/升降小搜索
+  search_timeout: 3.0
 
   # 降落点；相对起飞点，约对应题图右上角黑色圆形区域
   land:
