@@ -125,7 +125,7 @@ class GroundUDPBridge:
         self.heartbeat_thread = threading.Thread(
             target=self.heartbeat_loop,
             daemon=True
-        )  # 状态心跳线程
+        )
 
         self.recv_thread.start()
         self.heartbeat_thread.start()
@@ -177,6 +177,7 @@ class GroundUDPBridge:
             except Exception as e:
                 if self.running:  # 非主动关闭时才打印异常
                     rospy.logwarn("UDP receive failed: %s", str(e))
+
 
     def heartbeat_loop(self):
         """周期性发送待命状态。
@@ -329,6 +330,10 @@ class GroundUDPBridge:
             # ====================【本次安全修改 2026-05-03 3】地面站复位按钮转发 /uav/reset ====================
             self.publish_bool_repeated(self.reset_pub, True)
             # =================================================================================
+            return
+
+        if text == "CMD:STATUS_PING":
+            self.send_node_status_snapshot()
             return
 
         if text == "CMD:PING":  # 通信测试指令

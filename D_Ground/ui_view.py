@@ -623,10 +623,12 @@ class GroundStationUI(QMainWindow):
         node_layout = QGridLayout()
         node_layout.setSpacing(3)
 
-        self.add_node_indicator(node_layout, "视觉", "VISION", 0, 0)
-        self.add_node_indicator(node_layout, "通信", "RECEIVER", 0, 1)
-        self.add_node_indicator(node_layout, "飞控", "FSM", 0, 2)
-        self.add_node_indicator(node_layout, "ROS", "ROS", 0, 3)
+        # 单行五灯：去掉 ROS/MAVROS 指示灯，保留任务关键链路
+        self.add_node_indicator(node_layout, "RECEIVER", "RECEIVER", 0, 0)
+        self.add_node_indicator(node_layout, "FSM1", "FSM1", 0, 1)
+        self.add_node_indicator(node_layout, "FSM2", "FSM2", 0, 2)
+        self.add_node_indicator(node_layout, "VISION", "VISION", 0, 3)
+        self.add_node_indicator(node_layout, "MANAGER", "MANAGER", 0, 4)
 
         layout.addLayout(node_layout)
 
