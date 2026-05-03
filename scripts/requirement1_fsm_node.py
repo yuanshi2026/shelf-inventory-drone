@@ -9,6 +9,7 @@ import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
+from mavros_msgs.msg import State
 
 
 def clamp(value, min_value, max_value):
@@ -47,7 +48,7 @@ class Requirement1FSM:
         rospy.init_node("requirement1_fsm_node")
 
         self.odom_topic = rospy.get_param("~odom_topic", "/Odometry")        # 定位输入话题
-        self.cmd_vel_topic = rospy.get_param("~cmd_vel_topic", "/uav/cmd_vel") # 速度输出话题
+        self.cmd_vel_topic = rospy.get_param("~cmd_vel_topic", "/task1/cmd_vel") # 速度输出话题：任务仲裁器模式下默认输出到 /task1/cmd_vel
 
         self.mission = rospy.get_param("/mission") # YAML 中的 mission 参数字典
 
@@ -124,6 +125,14 @@ class Requirement1FSM:
         ) # 正常降落请求发布器；不要复用 /uav/stop，/uav/stop 只保留给急停
         # ==================================================================================
 
+        # ====================【本次修改-安全 1】急停时同步通知 bridge 锁死 ====================
+        self.stop_pub = rospy.Publisher(
+            "/uav/stop",
+            Bool,
+            queue_size=5
+        ) # FSM 自身进入急停时，重复通知 bridge 也进入急停锁存
+        # ============================================================================
+
         rospy.Subscriber(
             self.odom_topic,
             Odometry,
@@ -152,6 +161,24 @@ class Requirement1FSM:
             queue_size=5
         ) # 订阅停止信号
 
+        # ====================【本次安全修改 2026-05-03 1】人工复位入口 ====================
+        rospy.Subscriber(
+            "/uav/reset",
+            Bool,
+            self.reset_callback,
+            queue_size=5
+        ) # 急停后人工复位，才允许重新回到 IDLE
+        # ==========================================================================
+
+        # ====================【本次安全修改 2026-05-03 2】订阅 MAVROS 状态，复位前确认已上锁 ====================
+        rospy.Subscriber(
+            "/mavros/state",
+            State,
+            self.mavros_state_callback,
+            queue_size=10
+        ) # /uav/reset 只允许在 armed=False 时生效
+        # =================================================================================
+
         rospy.Subscriber(
             "/ground/ack",
             String,
@@ -167,7 +194,11 @@ class Requirement1FSM:
             queue_size=10
         ) # 收到 DISARMED 后，FSM 才认为任务真正 FINISH
         # ======================================================================
+       
 
+
+
+        ##########==================##################变量定义及初始话###########================================================================
         self.current_pose_ok = False # 是否已收到定位
         self.x = 0.0                 # 当前 x 坐标
         self.y = 0.0                 # 当前 y 坐标
@@ -198,22 +229,38 @@ class Requirement1FSM:
 
         self.start_requested = False # 是否收到启动请求
         self.stop_requested = False  # 是否收到停止请求
+        # ====================【本次修改-安全 3】FSM 急停锁存状态 ====================
+        self.emergency_latched = False # 急停锁存；True 后不再继续旧航点
+        self.emergency_reason = ""     # 急停原因，便于终端排查
+        # ===================================================================
         self.last_ack_id = None      # 最近一次收到的 ACK 编号
         self.last_sent_goods_id = None # 最近一次发送的货物编号
 
         self.laser_started = False   # 当前激光状态中是否已经打开过激光
         self.result_sent = False     # 当前 SEND_RESULT 状态中是否已发送结果
-
-        # ====================【新增】LAND 状态与 mavros_sitl_bridge 的握手变量 ====================
         self.land_requested = False              # 是否已经向 /uav/land 发布过降落请求
         self.land_request_last_pub = rospy.Time(0) # 上次发布 /uav/land 的时间，用于低频重发
         self.land_status = "IDLE"               # bridge 回传的降落/上锁状态
-        # ===============================================================================
 
+        # ====================【本次安全修改 2026-05-03 3】复位安全判断与急停通知节流 ====================
+        self.mavros_state = State()               # MAVROS 当前状态，用于判断是否已经上锁
+        self.mavros_state_ok = False              # 是否已经收到过 /mavros/state
+        self.emergency_stop_last_pub = rospy.Time(0) # 上次向 bridge 重发 /uav/stop 的时间
+        # =================================================================================
+        # ================================================================================================================================================
+        
+        
+        
+        
+        #========================fsm主循环以及回调函数==========================================================
         self.loop_rate = rospy.Rate(30) # FSM 主循环频率
-
         rospy.loginfo("requirement1_fsm_node started.")
         self.state_pub.publish(String(data=self.state))
+
+    def mavros_state_callback(self, msg):
+        """保存 MAVROS armed/mode 状态，用于限制 /uav/reset 只能在已上锁后生效。"""
+        self.mavros_state = msg
+        self.mavros_state_ok = True
 
     def odom_callback(self, msg):
         """更新无人机当前位置和偏航角。"""
@@ -250,23 +297,110 @@ class Requirement1FSM:
     def start_callback(self, msg):
         """收到一键启动信号。"""
         if msg.data:  # 只响应 True
+            # ====================【本次修改-安全 4】急停后禁止直接继续任务 ====================
+            if self.emergency_latched:
+                rospy.logerr(
+                    "Start ignored: FSM emergency_latched=True, reason=%s. Publish /uav/reset first.",
+                    self.emergency_reason
+                )
+                return
+            # =====================================================================
             self.start_requested = True
 
     def stop_callback(self, msg):
-        """收到停止信号。"""
+        """收到停止信号。
+
+        注意：本节点也会向 /uav/stop 低频重发急停通知给 bridge。
+        因此急停已经锁存后，收到同一话题的 True 要直接忽略，
+        避免自己发布的 /uav/stop 再触发自己、形成回环刷屏。
+        """
         if msg.data:  # 只响应 True
-            self.stop_requested = True
+            if self.emergency_latched:
+                return
+            self.trigger_emergency_stop("/uav/stop received")
+
+    # ====================【本次安全修改 2026-05-03 4】急停锁存与人工复位 ====================
+    def publish_stop_to_bridge(self, force=False):
+        """向 bridge 发布 /uav/stop；急停后低频重发，避免 30Hz 刷屏。"""
+        now = rospy.Time.now()
+
+        if force or now - self.emergency_stop_last_pub > rospy.Duration(1.0):
+            self.stop_pub.publish(Bool(data=True))
+            self.emergency_stop_last_pub = now
+
+    def trigger_emergency_stop(self, reason):
+        """进入不可自动恢复的急停悬停状态，清除旧航点追踪动作。"""
+        first_enter = not self.emergency_latched
+
+        if first_enter:  # 第一次进入急停时打印原因
+            rospy.logerr("FSM EMERGENCY HOVER LATCHED: %s", reason)
+
+        self.emergency_latched = True
+        self.emergency_reason = reason
+        self.start_requested = False
+        self.stop_requested = True
+        self.current_scan_point = None
+        self.result_sent = False
+        self.laser_started = False
+        self.stop_motion()
+        self.laser_off()
+
+        # 只在第一次进入急停时强制通知 bridge。之后由 state_emergency_stop() 低频重发。
+        if first_enter:
+            self.publish_stop_to_bridge(force=True)
+
+        self.set_state("EMERGENCY_STOP")
+
+    def reset_callback(self, msg):
+        """人工复位 FSM；只允许已上锁后清状态，复位后从 IDLE 重新开始。"""
+        if not msg.data:  # 只响应 True
+            return
+
+        # 规则写死：未收到 MAVROS 状态，或者飞机仍 armed，都拒绝复位。
+        if not self.mavros_state_ok:
+            rospy.logerr("FSM reset rejected: no /mavros/state yet. Cannot prove vehicle is disarmed.")
+            return
+
+        if self.mavros_state.armed:
+            rospy.logerr("FSM reset rejected: vehicle is still armed. Land/disarm and move back to start point first.")
+            return
+
+        rospy.logwarn("FSM reset accepted. Return to IDLE and clear all old mission progress.")
+        self.emergency_latched = False
+        self.emergency_reason = ""
+        self.start_requested = False
+        self.stop_requested = False
+        self.current_index = 0
+        self.current_scan_point = None
+        self.last_ack_id = None
+        self.last_sent_goods_id = None
+        self.result_sent = False
+        self.laser_started = False
+        self.land_requested = False
+        self.land_status = "IDLE"
+        self.land_request_last_pub = rospy.Time(0)
+        self.qr = {
+            "found": False,
+            "id": -1,
+            "u": -1.0,
+            "v": -1.0,
+            "area": 0.0
+        }
+        self.qr_stamp = rospy.Time(0)
+        self.home_set = False
+        self.stop_motion()
+        self.laser_off()
+        self.set_state("IDLE")
+    # =================================================================================
 
     def ack_callback(self, msg):
         """保存地面站 ACK 编号。"""
         self.last_ack_id = msg.data.strip()
 
-    # ====================【新增】接收 mavros_sitl_bridge 的降落/上锁状态 ====================
     def land_status_callback(self, msg):
         """保存 bridge 回传的降落状态，例如 WAIT_LANDED、LANDED、DISARMED。"""
         self.land_status = msg.data.strip()
-    # ==========================================================================
-
+    
     def set_state(self, new_state):
         """切换 FSM 状态。"""
 
@@ -287,13 +421,11 @@ class Requirement1FSM:
         if new_state == "SEND_RESULT":  # 进入发送结果状态时重置发送标志
             self.result_sent = False
 
-        # ====================【新增】进入 LAND 时重置降落请求状态 ====================
         if new_state == "LAND":
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
-        # ================================================================
-
+    #===========================================================================================================================    
     def state_elapsed(self):
         """返回当前状态已经持续的时间。"""
         return (rospy.Time.now() - self.state_enter_time).to_sec()
@@ -516,10 +648,20 @@ class Requirement1FSM:
         """FSM 主循环。"""
 
         while not rospy.is_shutdown():  # ROS 未关闭时持续运行
-            if self.stop_requested:  # 急停优先处理
+            # ====================【本次安全修改 2026-05-03 5】急停锁存优先级最高 ====================
+            if self.emergency_latched:
                 self.laser_off()
                 self.stop_motion()
+                self.publish_stop_to_bridge()  # 低频重复通知 bridge 保持急停悬停锁存
                 self.set_state("EMERGENCY_STOP")
+                self.loop_rate.sleep()
+                continue
+
+            if self.stop_requested:  # 急停优先处理
+                self.trigger_emergency_stop("stop_requested flag set")
+                self.loop_rate.sleep()
+                continue
+            # =====================================================================
 
             if not self.current_pose_ok:  # 没有定位时不允许执行任务
                 rospy.logwarn_throttle(1.0, "Waiting for Odometry...")
@@ -760,9 +902,10 @@ class Requirement1FSM:
         self.laser_off()
 
     def state_emergency_stop(self):
-        """EMERGENCY_STOP：急停。"""
+        """EMERGENCY_STOP：急停悬停锁存，不再继续旧任务。"""
         self.stop_motion()
         self.laser_off()
+        self.publish_stop_to_bridge()  # 低频提醒 bridge 保持急停悬停锁存
 
 
 if __name__ == "__main__":
