@@ -276,7 +276,7 @@ class MainController:
             f"应用网络配置：本地端口 {local_port}，目标 {drone_ip}:{drone_port}"
         )
 
-        self.stop_comm_thread()
+        self.stop_comm_thread(blocking=False)
 
         self.comm = UDPComm(
             local_port=local_port,
@@ -288,7 +288,7 @@ class MainController:
         self.comm.start()
 
         self.user_ip_applied = bool(drone_ip)
-        self.ui.append_log("网络配置应用完成")
+        self.ui.append_log("网络配置已更新")
 
     def handle_clear_log(self):
         self.ui.clear_log()
@@ -609,6 +609,9 @@ class MainController:
         """
         reply_key = reply.strip().upper()
 
+        if self._should_filter_ping_unknown_reply(reply_key):
+            return
+
         reply_map = {
             "PONG": "通信链路正常（PONG）",
             "LAUNCH_OK": "ROS 已启动成功",
@@ -630,6 +633,11 @@ class MainController:
         self.ui.set_task_status(text)
         self.ui.append_log(text)
 
+    def _should_filter_ping_unknown_reply(self, reply_key: str) -> bool:
+        if not reply_key.startswith("UNKNOWN_CMD:"):
+            return False
+        return reply_key.endswith("CMD:PING") or reply_key.endswith("CMD:STATUS_PING")
+
     def handle_raw_data(self, data: str):
         """
         未识别数据
@@ -642,17 +650,32 @@ class MainController:
 
     def close(self):
         try:
-            self.stop_comm_thread()
+            self.stop_comm_thread(blocking=True)
         except Exception:
             pass
 
-    def stop_comm_thread(self):
+    def stop_comm_thread(self, blocking: bool = True):
         if not self.comm:
             return
 
-        self.comm.stop()
-        finished = self.comm.wait(self.COMM_WAIT_TIMEOUT_MS)
+        old_comm = self.comm
+        self.comm = None
+        old_comm.stop()
+
+        if not blocking:
+            old_comm.finished.connect(old_comm.deleteLater)
+            QTimer.singleShot(
+                self.COMM_WAIT_TIMEOUT_MS,
+                lambda: self._log_comm_stop_timeout_if_needed(old_comm),
+            )
+            return
+
+        finished = old_comm.wait(self.COMM_WAIT_TIMEOUT_MS)
         if not finished:
+            self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
+
+    def _log_comm_stop_timeout_if_needed(self, comm_thread):
+        if comm_thread and not comm_thread.isFinished():
             self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
 
 
