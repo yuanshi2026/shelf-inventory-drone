@@ -49,8 +49,19 @@ class Task2FSM:
 
         self.use_relative = bool(self.routes.get("use_relative", True))
         self.takeoff_height = float(self.routes.get("takeoff_height", 0.8))
+
+        # 相机初始离地高度补偿。
+        # 约定：task2_routes.yaml 里的 takeoff_height 和所有航点 z，
+        # 统一表示“相机中心目标离地高度”，而不是飞控定位点高度。
+        # 因此记录 home_z 时会减去 camera_initial_height。
+        self.camera_initial_height = float(
+            self.routes.get("camera_initial_height", 0.0)
+        )
+
         self.land_point = self.routes["land"]
-        self.approach_points = self.routes.get("approach", {})
+        # 第二问新版 YAML：不再使用单点 approach，改用按面配置的中间安全航线。
+        self.routes_to_face = self.routes.get("routes_to_face", {})
+        self.routes_from_face = self.routes.get("routes_from_face", {})
         self.scan_points = self.routes["scan_points"]
 
         self.arrive_pos_eps = float(self.routes.get("arrive_pos_eps", 0.15))
@@ -118,8 +129,10 @@ class Task2FSM:
         self.target_coord = ""
         self.target_face = ""
         self.target_slot = 0
-        self.target_approach = None
         self.target_scan = None
+        self.target_route_to_face = []
+        self.target_route_from_face = []
+        self.route_index = 0
         self.result_sent = False
 
         self.qr = {"found": False, "id": -1, "u": -1.0, "v": -1.0, "area": 0.0}
@@ -180,7 +193,7 @@ class Task2FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
-        if new_state in ["IDLE", "LOAD_TARGET", "TAKEOFF", "GOTO_APPROACH", "GOTO_SCAN_POINT", "RETURN_LAND", "LAND", "FINISH", "EMERGENCY_STOP"]:
+        if new_state in ["IDLE", "LOAD_TARGET", "TAKEOFF", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT", "RETURN_ROUTE", "LAND", "FINISH", "EMERGENCY_STOP"]:
             self.set_vision(False)
         if new_state in ["SEARCH_QR", "ALIGN_QR", "VERIFY_TARGET"]:
             self.set_vision(True)
@@ -283,9 +296,24 @@ class Task2FSM:
             rospy.logwarn("TASK2 update inventory_map failed: %s", str(e))
 
     def set_home(self):
-        self.home_x, self.home_y, self.home_z, self.home_yaw = self.x, self.y, self.z, self.yaw
+        self.home_x = self.x
+        self.home_y = self.y
+
+        # 与任务1保持一致：把 home_z 向下虚拟平移相机初始离地高度。
+        # 这样 YAML 中的 z 可以按“相机中心高度”填写。
+        self.home_z = self.z - self.camera_initial_height
+        self.home_yaw = self.yaw
         self.home_set = True
-        rospy.loginfo("TASK2 home set: x=%.2f y=%.2f z=%.2f yaw=%.1fdeg", self.x, self.y, self.z, math.degrees(self.yaw))
+
+        rospy.loginfo(
+            "TASK2 home set: x=%.2f y=%.2f z=%.2f raw_z=%.2f camera_initial_height=%.2f yaw=%.1fdeg",
+            self.home_x,
+            self.home_y,
+            self.home_z,
+            self.z,
+            self.camera_initial_height,
+            math.degrees(self.home_yaw)
+        )
 
     def resolve_point(self, point):
         p = deepcopy(point)
@@ -406,10 +434,26 @@ class Task2FSM:
         self.target_slot = slot
         self.target_scan = self.resolve_point(self.scan_points[coord])
 
-        approach_raw = self.approach_points.get(face, None)
-        self.target_approach = self.resolve_point(approach_raw) if approach_raw is not None else None
+        route_to_raw = self.routes_to_face.get(face, [])
+        route_from_raw = self.routes_from_face.get(face, [])
 
-        rospy.logwarn("TASK2 route built: id=%d coord=%s", self.target_id, self.target_coord)
+        if not route_to_raw:
+            rospy.logwarn("TASK2 routes_to_face[%s] not found in task2_routes", face)
+            return False
+
+        if not route_from_raw:
+            rospy.logwarn("TASK2 routes_from_face[%s] not found in task2_routes", face)
+            return False
+
+        self.target_route_to_face = [self.resolve_point(p) for p in route_to_raw]
+        self.target_route_from_face = [self.resolve_point(p) for p in route_from_raw]
+        self.route_index = 0
+
+        rospy.logwarn(
+            "TASK2 route built: id=%d coord=%s face=%s to_points=%d from_points=%d",
+            self.target_id, self.target_coord, self.target_face,
+            len(self.target_route_to_face), len(self.target_route_from_face)
+        )
         return True
 
     def publish_target_result(self, result_text):
@@ -454,8 +498,8 @@ class Task2FSM:
                 self.state_load_target()
             elif self.state == "TAKEOFF":
                 self.state_takeoff()
-            elif self.state == "GOTO_APPROACH":
-                self.state_goto_approach()
+            elif self.state == "GOTO_ROUTE_TO_FACE":
+                self.state_goto_route_to_face()
             elif self.state == "GOTO_SCAN_POINT":
                 self.state_goto_scan_point()
             elif self.state == "SEARCH_QR":
@@ -464,8 +508,8 @@ class Task2FSM:
                 self.state_align_qr()
             elif self.state == "VERIFY_TARGET":
                 self.state_verify_target()
-            elif self.state == "RETURN_LAND":
-                self.state_return_land()
+            elif self.state == "RETURN_ROUTE":
+                self.state_return_route()
             elif self.state == "LAND":
                 self.state_land()
             elif self.state == "FINISH":
@@ -493,7 +537,7 @@ class Task2FSM:
             self.target_face = "-"
             self.target_slot = 0
             self.publish_target_result("NOT_FOUND")
-            self.set_state("RETURN_LAND")
+            self.set_state("FINISH")
             return
         self.set_state("TAKEOFF")
 
@@ -502,16 +546,27 @@ class Task2FSM:
         self.goto_target(target)
         if self.arrived_target(target):
             self.stop_motion()
-            if self.target_approach is not None:
-                self.set_state("GOTO_APPROACH")
+            self.route_index = 0
+            if self.target_route_to_face:
+                self.set_state("GOTO_ROUTE_TO_FACE")
             else:
                 self.set_state("GOTO_SCAN_POINT")
 
-    def state_goto_approach(self):
-        self.goto_target(self.target_approach)
-        if self.arrived_target(self.target_approach):
+    def state_goto_route_to_face(self):
+        if self.route_index >= len(self.target_route_to_face):
             self.stop_motion()
             self.set_state("GOTO_SCAN_POINT")
+            return
+
+        target = self.target_route_to_face[self.route_index]
+        self.goto_target(target)
+
+        if self.arrived_target(target):
+            self.stop_motion()
+            self.route_index += 1
+
+            if self.route_index >= len(self.target_route_to_face):
+                self.set_state("GOTO_SCAN_POINT")
 
     def state_goto_scan_point(self):
         self.goto_target(self.target_scan)
@@ -530,7 +585,8 @@ class Task2FSM:
             return
         self.stop_motion()
         self.publish_target_result("FAIL")
-        self.set_state("RETURN_LAND")
+        self.route_index = 0
+        self.set_state("RETURN_ROUTE")
 
     def state_align_qr(self):
         self.set_vision(True)
@@ -545,7 +601,8 @@ class Task2FSM:
         if self.state_elapsed() > self.align_timeout:
             self.stop_motion()
             self.publish_target_result("FAIL")
-            self.set_state("RETURN_LAND")
+            self.route_index = 0
+            self.set_state("RETURN_ROUTE")
             return
         self.visual_align()
 
@@ -557,19 +614,35 @@ class Task2FSM:
                 self.publish_target_result("OK")
             else:
                 self.publish_target_result("MISMATCH_%d" % int(self.qr["id"]))
-            self.set_state("RETURN_LAND")
+            self.route_index = 0
+            self.set_state("RETURN_ROUTE")
             return
         if self.state_elapsed() > self.verify_timeout:
             self.publish_target_result("FAIL")
-            self.set_state("RETURN_LAND")
+            self.route_index = 0
+            self.set_state("RETURN_ROUTE")
 
-    def state_return_land(self):
+    def state_return_route(self):
         self.set_vision(False)
-        target = self.resolve_point(self.land_point)
-        self.goto_target(target)
-        if self.arrived_target(target):
+
+        if not self.target_route_from_face:
+            self.target_route_from_face = [self.resolve_point(self.land_point)]
+            self.route_index = 0
+
+        if self.route_index >= len(self.target_route_from_face):
             self.stop_motion()
             self.set_state("LAND")
+            return
+
+        target = self.target_route_from_face[self.route_index]
+        self.goto_target(target)
+
+        if self.arrived_target(target):
+            self.stop_motion()
+            self.route_index += 1
+
+            if self.route_index >= len(self.target_route_from_face):
+                self.set_state("LAND")
 
     def state_land(self):
         self.set_vision(False)

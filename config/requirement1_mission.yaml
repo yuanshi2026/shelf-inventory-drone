@@ -4,6 +4,10 @@ mission:
 
   # 起飞高度，题目要求 150 ± 10 cm
   takeoff_height: 1.50
+  
+  # 相机起飞前离地高度，单位 m
+  # 例如：YAML 写 1.50m，但相机实际到 1.65m，说明相机初始离地约 0.15m
+  camera_initial_height: 0.15
 
   # 到达航点的误差阈值
   arrive_pos_eps: 0.15
