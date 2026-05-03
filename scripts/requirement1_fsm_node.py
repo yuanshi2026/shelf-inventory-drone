@@ -178,6 +178,14 @@ class Requirement1FSM:
             queue_size=20
         ) # FSM 状态发布器
 
+        # ====================【新增】视觉节点使能控制 ====================
+        self.vision_enable_pub = rospy.Publisher(
+            "/vision/enable",
+            Bool,
+            queue_size=5
+        ) # 扫码相关状态打开视觉节点，其它状态关闭，避免视觉算法常驻占资源
+        # ===============================================================
+
         # ====================【新增】正常任务完成后请求 mavros_sitl_bridge 自动降落/上锁 ====================
         self.land_pub = rospy.Publisher(
             "/uav/land",
@@ -316,7 +324,12 @@ class Requirement1FSM:
         #========================fsm主循环以及回调函数==========================================================
         self.loop_rate = rospy.Rate(30) # FSM 主循环频率
         rospy.loginfo("requirement1_fsm_node started.")
+        self.set_vision(False)
         self.state_pub.publish(String(data=self.state))
+
+    def set_vision(self, enabled):
+        """控制二维码视觉节点是否执行识别。"""
+        self.vision_enable_pub.publish(Bool(data=bool(enabled)))
 
     def mavros_state_callback(self, msg):
         """保存 MAVROS armed/mode 状态，用于限制 /uav/reset 只能在已上锁后生效。"""
@@ -403,6 +416,7 @@ class Requirement1FSM:
         self.current_scan_point = None
         self.result_sent = False
         self.laser_started = False
+        self.set_vision(False)
         self.stop_motion()
         self.laser_off()
 
@@ -452,6 +466,7 @@ class Requirement1FSM:
         self.arrive_hold_start = None
         self.smooth_cmd = Twist()
         self.last_control_time = rospy.Time.now()
+        self.set_vision(False)
         self.stop_motion()
         self.laser_off()
         self.set_state("IDLE")
@@ -489,6 +504,13 @@ class Requirement1FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
+
+        # ====================【新增】根据 FSM 状态控制视觉节点 ====================
+        if new_state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
+            self.set_vision(True)
+        else:
+            self.set_vision(False)
+        # ===============================================================
 
         # ====================【实飞稳定修改 2026-05-03】进入新目标状态时重置到点稳定计时 ====================
         if new_state in ["TAKEOFF", "GOTO_MISSION_POINT", "RETURN_LAND"]:
@@ -1158,11 +1180,13 @@ class Requirement1FSM:
 
     def state_finish(self):
         """FINISH：任务完成。"""
+        self.set_vision(False)
         self.stop_motion()
         self.laser_off()
 
     def state_emergency_stop(self):
         """EMERGENCY_STOP：急停悬停锁存，不再继续旧任务。"""
+        self.set_vision(False)
         self.stop_motion()
         self.laser_off()
         self.publish_stop_to_bridge()  # 低频提醒 bridge 保持急停悬停锁存
