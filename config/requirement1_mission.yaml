@@ -4,7 +4,7 @@ mission:
 
   # 起飞高度，题目要求 150 ± 10 cm
   takeoff_height: 1.50
-  
+
   # 相机起飞前离地高度，单位 m
   # 例如：YAML 写 1.50m，但相机实际到 1.65m，说明相机初始离地约 0.15m
   camera_initial_height: 0.15
@@ -38,35 +38,29 @@ mission:
   max_align_vel_z: 0.08
 
   # 超时与激光点亮时间
+  search_timeout: 3.0
   align_timeout: 4.0
   laser_flash_time: 0.5
   ack_timeout: 0.4
 
-  # 扫码点稳定参数：不降低巡航速度，只是在扫码前确认机体停稳
-  scan_pre_hover_time: 2.0
-  scan_pre_hover_timeout: 3.0
-  settle_vel_xy_eps: 0.05
-  settle_vel_z_eps: 0.04
-  settle_yaw_rate_eps: 0.12
-
-  # 正式扫码等待时长；此阶段只原地等待二维码，不做横移/升降小搜索
-  search_timeout: 3.0
-
-  # 降落点；相对起飞点，约对应题图右上角黑色圆形区域
+  # 降落点：题图右上角黑色圆形区域中心。
+  # D 面最后一个盘点点为 z=1.40，因此这里也保持 z=1.40，扫完 D 面后直接平移到降落点正上方，再由 AUTO.LAND 降落。
   land:
-    x: 3.25
-    y: 2.25
-    z: 0.5
-    yaw: 0.0
+    x: 3.50
+    y: 2.50
+    z: 1.40
+    yaw: 3.1416
 
   # type=safe 表示安全过渡点；type=scan 表示盘点点
   # yaw=0.0 面向赛场 +X；yaw=3.1416 面向赛场 -X
+  # 两个货架中心线约为 x=0.75 / x=2.75，scan 点距离货架面约 0.45m，保持二维码识别舒适距离。
+  # A/B、C/D 换面时采用下方“凸字/U 型绕行”，绕行通道 y=-0.10，与货架下端红杆 y=0.25 保持约 0.35m 距离。
   points:
     # 起飞后进入左货架下方安全通道
     - {type: safe, x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
     - {type: safe, x: 0.30, y: 0.25, z: 1.50, yaw: 0.0}
 
-    # A 面：左货架左侧
+    # A 面：左货架左侧，距离左货架中心线 x=0.75 约 0.45m
     - {type: scan, face: A, slot: 1, x: 0.30, y: 0.75, z: 1.40, yaw: 0.0}
     - {type: scan, face: A, slot: 2, x: 0.30, y: 1.25, z: 1.40, yaw: 0.0}
     - {type: scan, face: A, slot: 3, x: 0.30, y: 1.75, z: 1.40, yaw: 0.0}
@@ -74,12 +68,12 @@ mission:
     - {type: scan, face: A, slot: 5, x: 0.30, y: 1.25, z: 1.00, yaw: 0.0}
     - {type: scan, face: A, slot: 4, x: 0.30, y: 0.75, z: 1.00, yaw: 0.0}
 
-    # ==================== 本次修改：A 面到 B 面，先移动，后原地转向 ====================
-    - {type: safe, x: 0.30, y: 0.25, z: 1.30, yaw: 0.0}
-    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 0.0}
-    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 3.1416}
+    # A 面 -> B 面：从左货架下端红杆外侧绕行；z 保持 1.00，不再额外调到 1.30
+    - {type: safe, x: 0.30, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 1.20, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 1.20, y: -0.10, z: 1.00, yaw: 3.1416}
 
-    # B 面：左货架右侧
+    # B 面：左货架右侧，距离左货架中心线 x=0.75 约 0.45m
     - {type: scan, face: B, slot: 4, x: 1.20, y: 0.75, z: 1.00, yaw: 3.1416}
     - {type: scan, face: B, slot: 5, x: 1.20, y: 1.25, z: 1.00, yaw: 3.1416}
     - {type: scan, face: B, slot: 6, x: 1.20, y: 1.75, z: 1.00, yaw: 3.1416}
@@ -87,12 +81,10 @@ mission:
     - {type: scan, face: B, slot: 2, x: 1.20, y: 1.25, z: 1.40, yaw: 3.1416}
     - {type: scan, face: B, slot: 1, x: 1.20, y: 0.75, z: 1.40, yaw: 3.1416}
 
-    # ==================== 本次修改：B 面到 C 面，先退出，后原地转向，再横移 ====================
-    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 3.1416}
-    - {type: safe, x: 1.20, y: 0.25, z: 1.30, yaw: 0.0}
-    - {type: safe, x: 2.30, y: 0.25, z: 1.30, yaw: 0.0}
+    # B 面 -> C 面：两个货架中间是安全通道，仅原地转向后横移；z 保持 1.40
+    - {type: safe, x: 1.20, y: 0.75, z: 1.40, yaw: 0.0}
 
-    # C 面：右货架左侧
+    # C 面：右货架左侧，距离右货架中心线 x=2.75 约 0.45m
     - {type: scan, face: C, slot: 1, x: 2.30, y: 0.75, z: 1.40, yaw: 0.0}
     - {type: scan, face: C, slot: 2, x: 2.30, y: 1.25, z: 1.40, yaw: 0.0}
     - {type: scan, face: C, slot: 3, x: 2.30, y: 1.75, z: 1.40, yaw: 0.0}
@@ -100,19 +92,15 @@ mission:
     - {type: scan, face: C, slot: 5, x: 2.30, y: 1.25, z: 1.00, yaw: 0.0}
     - {type: scan, face: C, slot: 4, x: 2.30, y: 0.75, z: 1.00, yaw: 0.0}
 
-    # ==================== 本次修改：C 面到 D 面，先移动，后原地转向 ====================
-    - {type: safe, x: 2.30, y: 0.25, z: 1.30, yaw: 0.0}
-    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 0.0}
-    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 3.1416}
+    # C 面 -> D 面：从右货架下端红杆外侧绕行；z 保持 1.00，不再额外调到 1.30
+    - {type: safe, x: 2.30, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 3.20, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 3.20, y: -0.10, z: 1.00, yaw: 3.1416}
 
-    # D 面：右货架右侧
+    # D 面：右货架右侧，距离右货架中心线 x=2.75 约 0.45m
     - {type: scan, face: D, slot: 4, x: 3.20, y: 0.75, z: 1.00, yaw: 3.1416}
     - {type: scan, face: D, slot: 5, x: 3.20, y: 1.25, z: 1.00, yaw: 3.1416}
     - {type: scan, face: D, slot: 6, x: 3.20, y: 1.75, z: 1.00, yaw: 3.1416}
     - {type: scan, face: D, slot: 3, x: 3.20, y: 1.75, z: 1.40, yaw: 3.1416}
     - {type: scan, face: D, slot: 2, x: 3.20, y: 1.25, z: 1.40, yaw: 3.1416}
     - {type: scan, face: D, slot: 1, x: 3.20, y: 0.75, z: 1.40, yaw: 3.1416}
-
-    # ==================== 本次修改：D 面结束后，先退出，后原地转回 +X ====================
-    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 3.1416}
-    - {type: safe, x: 3.20, y: 0.25, z: 1.30, yaw: 0.0}
