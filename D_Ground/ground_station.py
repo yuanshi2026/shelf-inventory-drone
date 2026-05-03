@@ -231,7 +231,6 @@ class MainController:
 
     def handle_reset_all(self):
         self.ui.reset_all()
-        self.reset_inventory_data(reset_ui=False)
         self.reset_state_cache()
         self.ui.append_log("已执行全局复位")
 

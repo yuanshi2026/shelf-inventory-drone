@@ -893,12 +893,26 @@ class GroundStationUI(QMainWindow):
                 btn.setText(f"{coord}\n--")
                 btn.setStyleSheet(self.style_cell_empty())
 
+    def clear_current_run_scan_marks(self):
+        """仅清除本次运行的新扫描绿色标记，保留表格中的历史数据。"""
+        self.clear_highlight()
+
+        for coord, value in self.inventory_data.items():
+            btn = self.cell_buttons.get(coord)
+            if not btn:
+                continue
+
+            if value is None:
+                btn.setStyleSheet(self.style_cell_empty())
+            else:
+                btn.setStyleSheet(self.style_cell_history())
+
     def reset_node_indicators(self):
         for key in self.node_indicators.keys():
             self.set_node_ready(key, False)
 
     def reset_all(self):
-        self.reset_inventory_table()
+        self.clear_current_run_scan_marks()
         self.reset_node_indicators()
 
         self.query_input.setText("")
