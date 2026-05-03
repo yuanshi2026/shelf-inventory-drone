@@ -154,20 +154,17 @@ class RouteMapWidget(QWidget):
     def _draw_route(self, painter, field):
         start = self._start_point(field)
         land = self._land_point(field)
-        target = self._coord_point(field, self.target_coord)
-        entry = self._entry_point(field, self.target_coord[0])
+        scan_point = self._entry_point(field, self.target_coord[0])
 
         _, top, _, _ = field
         safe_y = top + 40
 
-        # 仅使用水平/竖直线，先到目标面入口，再到目标点，最后走上方安全通道到降落点
+        # 航线只表示无人机实际飞行路径：到目标货架面的扫描观察位后转入返航
         points = [
             start,
-            (entry[0], start[1]),
-            entry,
-            (target[0], entry[1]),
-            target,
-            (target[0], safe_y),
+            (scan_point[0], start[1]),
+            scan_point,
+            (scan_point[0], safe_y),
             (land[0], safe_y),
             land,
         ]
@@ -348,11 +345,11 @@ class RouteMapDialog(QDialog):
 
         if self.target_id and self.target_coord:
             face = self.target_coord[0]
-            route_text = f"起飞点 S → {face}面入口 → {self.target_coord} → 降落点 L"
+            route_text = f"起飞点 S → {face}面扫描位 → 目标 {self.target_coord} → 降落点 L"
             self.info_label.setText(
                 f"目标编号：{self.target_id}    "
                 f"目标坐标：{self.target_coord}    "
-                f"规划航线：{route_text}"
+                f"执行流程：{route_text}"
             )
         elif self.target_id:
             self.info_label.setText(
