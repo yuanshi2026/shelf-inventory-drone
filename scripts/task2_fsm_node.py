@@ -49,6 +49,15 @@ class Task2FSM:
 
         self.use_relative = bool(self.routes.get("use_relative", True))
         self.takeoff_height = float(self.routes.get("takeoff_height", 0.8))
+
+        # 相机初始离地高度补偿。
+        # 约定：task2_routes.yaml 里的 takeoff_height 和所有航点 z，
+        # 统一表示“相机中心目标离地高度”，而不是飞控定位点高度。
+        # 因此记录 home_z 时会减去 camera_initial_height。
+        self.camera_initial_height = float(
+            self.routes.get("camera_initial_height", 0.0)
+        )
+
         self.land_point = self.routes["land"]
         # 第二问新版 YAML：不再使用单点 approach，改用按面配置的中间安全航线。
         self.routes_to_face = self.routes.get("routes_to_face", {})
@@ -287,9 +296,24 @@ class Task2FSM:
             rospy.logwarn("TASK2 update inventory_map failed: %s", str(e))
 
     def set_home(self):
-        self.home_x, self.home_y, self.home_z, self.home_yaw = self.x, self.y, self.z, self.yaw
+        self.home_x = self.x
+        self.home_y = self.y
+
+        # 与任务1保持一致：把 home_z 向下虚拟平移相机初始离地高度。
+        # 这样 YAML 中的 z 可以按“相机中心高度”填写。
+        self.home_z = self.z - self.camera_initial_height
+        self.home_yaw = self.yaw
         self.home_set = True
-        rospy.loginfo("TASK2 home set: x=%.2f y=%.2f z=%.2f yaw=%.1fdeg", self.x, self.y, self.z, math.degrees(self.yaw))
+
+        rospy.loginfo(
+            "TASK2 home set: x=%.2f y=%.2f z=%.2f raw_z=%.2f camera_initial_height=%.2f yaw=%.1fdeg",
+            self.home_x,
+            self.home_y,
+            self.home_z,
+            self.z,
+            self.camera_initial_height,
+            math.degrees(self.home_yaw)
+        )
 
     def resolve_point(self, point):
         p = deepcopy(point)
