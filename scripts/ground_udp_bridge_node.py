@@ -195,6 +195,21 @@ class GroundUDPBridge:
 
             time.sleep(self.heartbeat_interval)
 
+    def parse_task2_target_id(self, text):
+        prefix = "CMD:START_TASK2:"
+        if not text.startswith(prefix):
+            return None
+
+        target_text = text[len(prefix):].strip()
+        if not target_text or (not target_text.isdigit()):
+            return None
+
+        target_number = int(target_text)
+        if target_number < 1 or target_number > 24:
+            return None
+
+        return target_number
+
     def handle_command(self, text):
         """处理地面站发来的 CMD 指令。"""
 
@@ -210,27 +225,14 @@ class GroundUDPBridge:
             # ==================================================================
             return
 
-        if text.startswith("CMD:START_TASK2"):
-            # 启动任务 2：定向盘点。推荐格式：CMD:START_TASK2:<编号>，例如 CMD:START_TASK2:8
-            parts = text.split(":")
-
-            if len(parts) < 3:
-                self.send_udp("REPLY:TASK2_TARGET_REQUIRED")
-                self.send_udp("STATUS:ERROR")
+        if text.startswith("CMD:START_TASK2"):  # 启动任务 2：定向盘点
+            target_id = self.parse_task2_target_id(text)
+            if target_id is None:
+                self.send_udp("REPLY:UNKNOWN_CMD")
+                rospy.logwarn("Invalid task2 start command: %s", text)
                 return
 
-            try:
-                target_id = int(parts[2])
-            except Exception:
-                self.send_udp("REPLY:TASK2_TARGET_INVALID")
-                self.send_udp("STATUS:ERROR")
-                return
-
-            if target_id < 1 or target_id > 24:
-                self.send_udp("REPLY:TASK2_TARGET_INVALID")
-                self.send_udp("STATUS:ERROR")
-                return
-
+            self.latest_target_id = target_id
             self.task1_running = False
             self.task2_running = True
             self.latest_target_id = target_id
