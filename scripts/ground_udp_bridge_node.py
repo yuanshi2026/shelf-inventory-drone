@@ -34,19 +34,19 @@ class GroundUDPBridge:
         self.sock.bind((self.local_ip, self.local_port))
 
         self.start_pub = rospy.Publisher(
-            "/uav/start",
+            "/uav/request_task1",
             Bool,
             queue_size=5
         )  # 任务 1 启动话题
 
         self.stop_pub = rospy.Publisher(
-            "/uav/stop",
+            "/uav/request_stop",
             Bool,
             queue_size=5
         )  # 紧急停止话题
 
         self.task2_start_pub = rospy.Publisher(
-            "/uav/start_task2",
+            "/uav/request_task2",
             Bool,
             queue_size=5
         )  # 任务 2 启动话题，后续任务 2 FSM 可订阅

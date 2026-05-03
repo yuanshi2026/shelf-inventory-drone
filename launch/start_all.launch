@@ -16,7 +16,7 @@
          这里沿用你之前启动命令：
          roslaunch livox_ros_driver2 msg_MID360.launch
     ================================ -->
-<include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch" />
+    <include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch" />
 
 
     <!-- ===============================
@@ -55,22 +55,40 @@
 
 
     <!-- ===============================
-         6. 任务 FSM
+         6. 任务仲裁器
+         作用：
+         /task1/cmd_vel 或 /task2/cmd_vel
+             ↓
+         根据当前任务模式，只转发一路到 /uav/cmd_vel
+    ================================ -->
+    <node pkg="uav_inventory"
+          type="mission_manager_node.py"
+          name="mission_manager_node"
+          output="screen">
+        <param name="rate_hz" value="30.0" />
+        <param name="cmd_timeout" value="0.5" />
+    </node>
+
+
+    <!-- ===============================
+         7. 任务 FSM1
          当前不启动 mavros_pose_to_odom.py，
          直接订阅 MAVROS 自带的 nav_msgs/Odometry：
          /mavros/local_position/odom
+         注意：FSM1 速度输出改为 /task1/cmd_vel，
+         最终由 mission_manager_node 仲裁后转发到 /uav/cmd_vel
     ================================ -->
     <node pkg="uav_inventory"
           type="requirement1_fsm_node.py"
           name="requirement1_fsm_node"
           output="screen">
         <param name="odom_topic" value="/mavros/local_position/odom" />
-        <param name="cmd_vel_topic" value="/uav/cmd_vel" />
+        <param name="cmd_vel_topic" value="/task1/cmd_vel" />
     </node>
 
 
     <!-- ===============================
-         7. 地面站 UDP 桥
+         8. 地面站 UDP 桥
          Jetson 监听 8889，地面站监听 8888
          ground_ip 改成你地面站电脑 / 树莓派的实际 IP
     ================================ -->
@@ -86,22 +104,26 @@
 
         <param name="heartbeat_interval" value="2.0" />
     </node>
-    
-     <node pkg="uav_inventory"
+
+
+    <!-- ===============================
+         9. 二维码视觉节点
+    ================================ -->
+    <node pkg="uav_inventory"
           type="qr_vision_node.py"
           name="qr_vision_node"
           output="screen">
-     <param name="enable_topic" value="/vision/enable" />
-     <param name="qr_result_topic" value="/qr/result" />
+        <param name="enable_topic" value="/vision/enable" />
+        <param name="qr_result_topic" value="/qr/result" />
 
-     <param name="width" value="848" />
-     <param name="height" value="480" />
-     <param name="fps" value="30" />
+        <param name="width" value="848" />
+        <param name="height" value="480" />
+        <param name="fps" value="30" />
 
-     <param name="publish_rate_hz" value="10.0" />
-     <param name="disabled_publish_rate_hz" value="1.0" />
+        <param name="publish_rate_hz" value="10.0" />
+        <param name="disabled_publish_rate_hz" value="1.0" />
 
-     <!-- 真机比赛建议 false，调试时可以改 true -->
-     <param name="show_debug" value="false" />
-</node>
+        <!-- 真机比赛建议 false，调试时可以改 true -->
+        <param name="show_debug" value="false" />
+    </node>
 </launch>
