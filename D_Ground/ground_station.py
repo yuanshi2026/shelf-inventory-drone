@@ -65,6 +65,12 @@ class MainController:
         self.status_ping_timer.timeout.connect(self.send_status_ping)
         self.status_ping_paused = False
 
+        self._stopping_comms = []
+        self._comm_rebuilding = False
+        self._comm_cleanup_timer = QTimer()
+        self._comm_cleanup_timer.setInterval(200)
+        self._comm_cleanup_timer.timeout.connect(self._cleanup_stopping_comms)
+
         self.bind_ui_signals()
         self.bind_comm_signals()
         QApplication.instance().aboutToQuit.connect(self.close)
@@ -99,20 +105,52 @@ class MainController:
         self.ui.land_clicked.connect(self.handle_land)
         self.ui.route_map_clicked.connect(self.handle_show_route_map)
 
-    def bind_comm_signals(self):
+    def bind_comm_signals(self, comm=None):
         """
         绑定通信模块发出的信号
         """
-        self.comm.comm_status.connect(self.handle_comm_status)
+        comm = comm or self.comm
+        comm.comm_status.connect(self.handle_comm_status)
 
-        self.comm.status_received.connect(self.handle_status)
-        self.comm.status_received_with_addr.connect(self.handle_status_with_addr)
+        comm.status_received.connect(self.handle_status)
+        comm.status_received_with_addr.connect(self.handle_status_with_addr)
 
-        self.comm.scan_received.connect(self.handle_scan)
-        self.comm.target_id_received.connect(self.handle_target_id)
-        self.comm.target_result_received.connect(self.handle_target_result)
-        self.comm.reply_received.connect(self.handle_reply)
-        self.comm.raw_received.connect(self.handle_raw_data)
+        comm.scan_received.connect(self.handle_scan)
+        comm.target_id_received.connect(self.handle_target_id)
+        comm.target_result_received.connect(self.handle_target_result)
+        comm.reply_received.connect(self.handle_reply)
+        comm.raw_received.connect(self.handle_raw_data)
+
+    def unbind_comm_signals(self, comm=None):
+        comm = comm or self.comm
+        if comm is None:
+            return
+        signal_names = [
+            "comm_status",
+            "status_received",
+            "status_received_with_addr",
+            "scan_received",
+            "target_id_received",
+            "target_result_received",
+            "reply_received",
+            "raw_received",
+        ]
+        for signal_name in signal_names:
+            try:
+                getattr(comm, signal_name).disconnect()
+            except Exception:
+                pass
+
+    def _is_active_comm_sender(self) -> bool:
+        app = QApplication.instance()
+        sender = app.sender() if app else None
+        return sender is None or sender is self.comm
+
+    def _get_comm_for_send(self):
+        if self._comm_rebuilding or self.comm is None:
+            self.ui.append_log("通信通道重建中，请稍后重试")
+            return None
+        return self.comm
 
     # ==================================================
     # UI 事件处理
@@ -139,9 +177,12 @@ class MainController:
         # 仅在机载 ROS 已启动后执行轮询，避免无意义 PING/STATUS_PING 刷屏
         if self.status_ping_paused or not self.ros_launch_success:
             return
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:PING")
-        self.comm.send_data("CMD:STATUS_PING")
+        comm.send_data("CMD:PING")
+        comm.send_data("CMD:STATUS_PING")
 
     def handle_start_task1(self):
         """
@@ -151,9 +192,12 @@ class MainController:
         self.ui.append_log("按钮：启动任务1")
         self.ui.set_task_status("已发送任务1启动指令")
 
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = "CMD:START_TASK1"
-        self.comm.send_data(command)
+        comm.send_data(command)
         self.pause_status_ping("任务1启动")
 
     def _parse_valid_task2_target_id(self, target_id: str):
@@ -183,9 +227,12 @@ class MainController:
         self.ui.append_log("按钮：启动任务二定点盘点")
         self.ui.set_task_status("已发送任务二定点盘点启动指令")
 
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = f"CMD:START_TASK2:{target_id}"
-        self.comm.send_data(command)
+        comm.send_data(command)
         self.pause_status_ping("任务2启动")
         self.ui.set_task2_start_enabled(False)
 
@@ -196,23 +243,32 @@ class MainController:
         self.ui.append_log("按钮：任务二识别目标")
         self.ui.set_task_status("已发送任务二目标识别指令")
 
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = "CMD:TASK2_SCAN_TARGET"
-        self.comm.send_data(command)
+        comm.send_data(command)
 
     def handle_stop(self):
         self.ui.append_log("已发送刹停指令")
         self.ui.set_task_status("已发送刹停指令")
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = "CMD:EMERGENCY_STOP"
-        self.comm.send_data(command)
+        comm.send_data(command)
 
     def handle_land(self):
         self.ui.append_log("已发送降落指令")
         self.ui.set_task_status("已发送降落指令")
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = "CMD:LAND"
-        self.comm.send_data(command)
+        comm.send_data(command)
 
     def handle_show_route_map(self):
         """
@@ -233,9 +289,12 @@ class MainController:
         """
         self.ui.append_log("已发送ROS启动指令，等待机载端响应……")
         self.ui.set_ros_launch_state("启动中...")
+        comm = self._get_comm_for_send()
+        if comm is None:
+            return
         self.sync_comm_target_from_ui()
         command = "CMD:LAUNCH"
-        self.comm.send_data(command)
+        comm.send_data(command)
 
     def handle_query(self, item_id: str):
         """
@@ -274,6 +333,12 @@ class MainController:
         """
         应用新的网络配置
         """
+        if self._comm_rebuilding:
+            self.ui.append_log("网络配置正在应用中，请勿重复点击")
+            return
+
+        self._comm_rebuilding = True
+        self.pause_status_ping("切换网络配置")
         self.ui.append_log(
             f"应用网络配置：本地端口 {local_port}，目标 {drone_ip}:{drone_port}"
         )
@@ -286,10 +351,13 @@ class MainController:
             drone_port=drone_port
         )
 
-        self.bind_comm_signals()
+        self.bind_comm_signals(self.comm)
         self.comm.start()
 
         self.user_ip_applied = bool(drone_ip)
+        self._comm_rebuilding = False
+        if self.ros_launch_success:
+            self.resume_status_ping("网络配置已应用")
         self.ui.append_log("网络配置已更新")
 
     def handle_clear_log(self):
@@ -413,6 +481,9 @@ class MainController:
     # ==================================================
 
     def handle_comm_status(self, text: str):
+        if not self._is_active_comm_sender():
+            return
+
         self.ui.set_comm_status(text)
         self.last_comm_status = text
         if text.startswith("已发送："):
@@ -421,6 +492,9 @@ class MainController:
             self.ui.append_log(text)
 
     def handle_status(self, status: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         处理无人机状态
         例如：
@@ -503,6 +577,9 @@ class MainController:
         self.ui.append_log(f"未知状态：{status}")
 
     def handle_status_with_addr(self, status: str, src_ip: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         带来源 IP 的状态包
         用于自动捕获无人机 IP
@@ -531,6 +608,9 @@ class MainController:
                     self.ui.append_log(f"无人机 IP 已更新：{previous_ip} -> {src_ip}")
 
     def handle_scan(self, coord: str, item_id: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         处理盘点结果
         协议示例：
@@ -559,6 +639,9 @@ class MainController:
         self.ui.append_log(f"盘点成功：{coord} -> 编号 {number}")
 
     def handle_target_id(self, item_id: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         定点盘点前，收到目标编号
         协议示例：
@@ -582,6 +665,9 @@ class MainController:
         self.ui.set_task2_start_enabled(True)
 
     def handle_target_result(self, coord: str, item_id: str, result: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         定点盘点结果
         协议示例：
@@ -606,6 +692,9 @@ class MainController:
         self.ui.append_log(text)
 
     def handle_reply(self, reply: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         处理机载端回复
         """
@@ -643,6 +732,9 @@ class MainController:
         return reply_key.endswith("CMD:PING") or reply_key.endswith("CMD:STATUS_PING")
 
     def handle_raw_data(self, data: str):
+        if not self._is_active_comm_sender():
+            return
+
         """
         未识别数据
         """
@@ -664,23 +756,44 @@ class MainController:
 
         old_comm = self.comm
         self.comm = None
+        self.unbind_comm_signals(old_comm)
         old_comm.stop()
 
         if not blocking:
-            old_comm.finished.connect(old_comm.deleteLater)
-            QTimer.singleShot(
-                self.COMM_WAIT_TIMEOUT_MS,
-                lambda: self._log_comm_stop_timeout_if_needed(old_comm),
-            )
+            self._stopping_comms.append({"thread": old_comm, "deadline_ms": self.COMM_WAIT_TIMEOUT_MS})
+            if not self._comm_cleanup_timer.isActive():
+                self._comm_cleanup_timer.start()
             return
 
         finished = old_comm.wait(self.COMM_WAIT_TIMEOUT_MS)
         if not finished:
             self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
 
-    def _log_comm_stop_timeout_if_needed(self, comm_thread):
-        if comm_thread and not comm_thread.isFinished():
-            self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
+    def _cleanup_stopping_comms(self):
+        if not self._stopping_comms:
+            self._comm_cleanup_timer.stop()
+            return
+
+        pending = []
+        for entry in self._stopping_comms:
+            thread = entry.get("thread")
+            deadline = int(entry.get("deadline_ms", 0))
+
+            if thread.isFinished():
+                thread.deleteLater()
+                continue
+
+            deadline -= self._comm_cleanup_timer.interval()
+            if deadline <= 0:
+                self.ui.append_log(f"通信线程停止超时（{self.COMM_WAIT_TIMEOUT_MS}ms）")
+                continue
+
+            entry["deadline_ms"] = deadline
+            pending.append(entry)
+
+        self._stopping_comms = pending
+        if not self._stopping_comms:
+            self._comm_cleanup_timer.stop()
 
 
 if __name__ == "__main__":
