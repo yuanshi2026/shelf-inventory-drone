@@ -125,11 +125,17 @@ class MainController:
         """
         启动任务二：定点盘点
         """
+        target_id = (self.task2_target_id or "").strip()
+        if not target_id:
+            self.ui.append_log("任务二启动失败：尚未识别目标编号（请先执行任务2.1）")
+            self.ui.set_task_status("任务二启动失败：缺少目标编号")
+            return
+
         self.ui.append_log("按钮：启动任务二定点盘点")
         self.ui.set_task_status("已发送任务二定点盘点启动指令")
 
         self.sync_comm_target_from_ui()
-        self.comm.send_data("CMD:START_TASK2")
+        self.comm.send_data(f"CMD:START_TASK2:{target_id}")
         self.ui.set_task2_start_enabled(False)
 
     def handle_task2_scan_target(self):
