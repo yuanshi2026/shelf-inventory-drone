@@ -322,7 +322,20 @@ class MockDrone:
                         daemon=True
                     ).start()
 
-                elif message == "CMD:START_TASK2":
+                elif message.startswith("CMD:START_TASK2"):
+                    # 新协议：CMD:START_TASK2:<target_id>
+                    # 兼容旧协议：CMD:START_TASK2
+                    target_id = None
+                    parts = message.split(":", 2)
+                    if len(parts) == 3 and parts[2].strip():
+                        target_id = parts[2].strip()
+                        self.task2_target_id = target_id
+                        print(f"🎯 收到任务2目标编号：{target_id}")
+                    elif message != "CMD:START_TASK2":
+                        print(f"[WARN] 任务2启动指令格式异常：{message}")
+                        self.send_to_ground(f"REPLY:UNKNOWN_CMD:{message}")
+                        continue
+
                     threading.Thread(
                         target=self.run_task2,
                         daemon=True
