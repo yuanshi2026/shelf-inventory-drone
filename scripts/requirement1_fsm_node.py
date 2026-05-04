@@ -9,7 +9,7 @@ import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
-from mavros_msgs.msg import State
+from mavros_msgs.msg import State, ExtendedState
 
 
 def clamp(value, min_value, max_value):
@@ -228,6 +228,43 @@ class Requirement1FSM:
         self.land_finish_timeout = float(
             self.mission.get("land_finish_timeout", 45.0)
         )
+
+        # ====================【修改 2026-05-04】受控递减高度降落参数 ====================
+        # 降落流程改为：
+        #   1. 先飞到 YAML 里的 land 点，即“开始降落点”；
+        #   2. 在该 x/y/yaw 上生成一串 z 递减的航点，靠速度控制缓慢下降；
+        #   3. 检测到接地/近地后，才发布 /uav/land=True，让 mavros bridge 切 AUTO.LAND 完成停桨/上锁。
+        # 这样避免刚到降落点就切 AUTO.LAND 导致机身大角度扭转、落点漂移。
+        self.controlled_land_step = float(
+            self.mission.get("controlled_land_step", 0.10)
+        ) # 每级下降高度，单位 m
+
+        self.controlled_land_final_height = float(
+            self.mission.get("controlled_land_final_height", 0.04)
+        ) # 最后一级目标：起飞地面高度 + 该值
+
+        self.controlled_land_contact_height = float(
+            self.mission.get("controlled_land_contact_height", 0.08)
+        ) # 判定接地/近地高度阈值
+
+        self.controlled_land_max_vel_z = float(
+            self.mission.get("controlled_land_max_vel_z", 0.06)
+        ) # 受控下降最大竖直速度，建议 0.04~0.08
+
+        self.controlled_land_max_acc_z = float(
+            self.mission.get("controlled_land_max_acc_z", 0.08)
+        ) # 受控下降最大竖直加速度
+
+        self.controlled_land_pos_eps = float(
+            self.mission.get("controlled_land_pos_eps", 0.08)
+        )
+        self.controlled_land_z_eps = float(
+            self.mission.get("controlled_land_z_eps", 0.04)
+        )
+        self.controlled_land_yaw_eps = math.radians(
+            float(self.mission.get("controlled_land_yaw_eps_deg", 8.0))
+        )
+        # ==========================================================================
         # ================================================================
 
         self.cmd_pub = rospy.Publisher(
@@ -324,6 +361,20 @@ class Requirement1FSM:
             self.mavros_state_callback,
             queue_size=10
         ) # /uav/reset 只允许在 armed=False 时生效
+
+        rospy.Subscriber(
+            "/mavros/extended_state",
+            ExtendedState,
+            self.extended_state_callback,
+            queue_size=10
+        ) # 用 PX4 landed_state 辅助判断是否已经接地
+
+        rospy.Subscriber(
+            "/uav/request_land",
+            Bool,
+            self.request_land_callback,
+            queue_size=5
+        ) # 急停悬停后的人工降落请求：先受控下降，接地后再 AUTO.LAND 停桨
         # =================================================================================
 
         rospy.Subscriber(
@@ -407,7 +458,15 @@ class Requirement1FSM:
         # ====================【本次安全修改 2026-05-03 3】复位安全判断与急停通知节流 ====================
         self.mavros_state = State()               # MAVROS 当前状态，用于判断是否已经上锁
         self.mavros_state_ok = False              # 是否已经收到过 /mavros/state
+        self.extended_state = ExtendedState()      # MAVROS extended_state，用于 landed_state 接地判断
+        self.extended_state_ok = False
         self.emergency_stop_last_pub = rospy.Time(0) # 上次向 bridge 重发 /uav/stop 的时间
+
+        # 受控降落内部状态
+        self.land_descent_points = []             # 由 YAML land 点生成的 z 递减航点
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False # 接地/近地后是否已请求 bridge 切 AUTO.LAND 停桨
+        self.external_land_requested = False       # 急停悬停后由 /uav/request_land 触发的受控降落请求
         # =================================================================================
 
         # ====================【修改】视觉使能去重 ====================
@@ -444,6 +503,38 @@ class Requirement1FSM:
         """保存 MAVROS armed/mode 状态，用于限制 /uav/reset 只能在已上锁后生效。"""
         self.mavros_state = msg
         self.mavros_state_ok = True
+
+    def extended_state_callback(self, msg):
+        """保存 landed_state，用于受控降落末端判断是否已接地。"""
+        self.extended_state = msg
+        self.extended_state_ok = True
+
+    def request_land_callback(self, msg):
+        """人工请求受控降落。主要用于急停悬停后：先降到地面，再让 bridge AUTO.LAND 停桨。"""
+        if not msg.data:
+            return
+
+        if self.state in ["IDLE", "FINISH"] and not self.emergency_latched:
+            rospy.logwarn("Controlled land request ignored: FSM is %s.", self.state)
+            return
+
+        rospy.logwarn("Controlled land requested: go to YAML land point, descend by z waypoints, then AUTO.LAND/disarm.")
+        self.external_land_requested = True
+        self.stop_requested = False
+
+        # 急停悬停锁存后，允许人工降落请求解除 FSM 自身的急停锁存，
+        # 但 bridge 的 /uav/stop 悬停锁存是否解除取决于 bridge 逻辑。
+        # 因此务必配合 ground_udp_bridge：CMD:LAND 应发布 /uav/request_land，而不是直接 /uav/land。
+        if self.emergency_latched:
+            self.emergency_latched = False
+            self.emergency_reason = ""
+
+        self.land_descent_points = []
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False
+        self.land_requested = False
+        self.land_status = "IDLE"
+        self.set_state("RETURN_LAND")
 
     def odom_callback(self, msg):
         """更新无人机当前位置和偏航角。"""
@@ -572,6 +663,10 @@ class Requirement1FSM:
         self.land_requested = False
         self.land_status = "IDLE"
         self.land_request_last_pub = rospy.Time(0)
+        self.land_descent_points = []
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False
+        self.external_land_requested = False
         self.qr = {
             "found": False,
             "id": -1,
@@ -622,6 +717,9 @@ class Requirement1FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
+            self.land_descent_points = []
+            self.land_descent_index = 0
+            self.land_final_autoland_requested = False
 
         # ====================【新增】根据 FSM 状态控制视觉节点 ====================
         if new_state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
@@ -1161,12 +1259,18 @@ class Requirement1FSM:
         while not rospy.is_shutdown():  # ROS 未关闭时持续运行
             # ====================【本次安全修改 2026-05-03 5】急停锁存优先级最高 ====================
             if self.emergency_latched:
-                self.laser_off()
-                self.stop_motion()
-                self.publish_stop_to_bridge()  # 低频重复通知 bridge 保持急停悬停锁存
-                self.set_state("EMERGENCY_STOP")
-                self.loop_rate.sleep()
-                continue
+                if self.external_land_requested:
+                    # 人工请求急停后受控降落，解除 FSM 自身锁存，转去 YAML land 点再递减 z 降落。
+                    self.emergency_latched = False
+                    self.stop_requested = False
+                    self.set_state("RETURN_LAND")
+                else:
+                    self.laser_off()
+                    self.stop_motion()
+                    self.publish_stop_to_bridge()  # 低频重复通知 bridge 保持急停悬停锁存
+                    self.set_state("EMERGENCY_STOP")
+                    self.loop_rate.sleep()
+                    continue
 
             if self.stop_requested:  # 急停优先处理
                 self.trigger_emergency_stop("stop_requested flag set")
@@ -1457,8 +1561,87 @@ class Requirement1FSM:
 
         self.set_state("GOTO_MISSION_POINT")
 
+    def get_ground_z(self):
+        """返回起飞地面对应的飞控 z。
+
+        注意：home_z 在 set_home() 中做过 camera_initial_height 补偿，
+        所以真实起飞地面 z 约等于 home_z + camera_initial_height。
+        """
+        return self.home_z + self.camera_initial_height
+
+    def px4_reports_on_ground(self):
+        """PX4 landed_state 是否认为已经在地面。"""
+        return (
+            self.extended_state_ok and
+            self.extended_state.landed_state == ExtendedState.LANDED_STATE_ON_GROUND
+        )
+
+    def controlled_land_contact_detected(self):
+        """判断是否已经接地/近地。
+
+        优先使用 /mavros/extended_state 的 landed_state；
+        没有该信息时，用起飞地面高度 + controlled_land_contact_height 做保守近地判断。
+        """
+        if self.px4_reports_on_ground():
+            return True
+
+        ground_z = self.get_ground_z()
+        return self.z <= ground_z + self.controlled_land_contact_height
+
+    def build_land_descent_points(self):
+        """从 YAML land 点生成 z 逐级递减的降落航点。"""
+        land_target = self.make_land_target()
+        ground_z = self.get_ground_z()
+        final_z = ground_z + self.controlled_land_final_height
+
+        start_z = float(land_target["z"])
+        if start_z < final_z:
+            start_z = self.z
+
+        z = start_z
+        points = []
+        step = max(0.02, abs(self.controlled_land_step))
+
+        while z - step > final_z:
+            z -= step
+            p = deepcopy(land_target)
+            p["z"] = z
+            points.append(p)
+
+        final_point = deepcopy(land_target)
+        final_point["z"] = final_z
+        points.append(final_point)
+
+        self.land_descent_points = points
+        self.land_descent_index = 0
+
+        rospy.logwarn(
+            "Controlled land path built: start_z=%.2f final_z=%.2f ground_z=%.2f points=%d",
+            start_z,
+            final_z,
+            ground_z,
+            len(points)
+        )
+
+    def request_final_autoland_after_contact(self):
+        """接地/近地后请求 bridge 执行 AUTO.LAND + 停桨上锁。"""
+        now = rospy.Time.now()
+
+        if (
+            not self.land_final_autoland_requested or
+            now - self.land_request_last_pub > rospy.Duration(1.0)
+        ):
+            self.land_pub.publish(Bool(data=True))
+            self.land_requested = True
+            self.land_final_autoland_requested = True
+            self.land_request_last_pub = now
+            rospy.logwarn_throttle(
+                1.0,
+                "Controlled land contact/near-ground reached. Publishing /uav/land=True for AUTO.LAND/disarm."
+            )
+
     def state_return_land(self):
-        """RETURN_LAND：飞到降落点上方。"""
+        """RETURN_LAND：飞到 YAML 中的开始降落点。"""
 
         target = self.make_land_target()
 
@@ -1471,39 +1654,64 @@ class Requirement1FSM:
             self.goto_target(target)
 
     def state_land(self):
-        """LAND：请求 mavros_sitl_bridge 切 AUTO.LAND，并等待真正落地上锁。"""
+        """LAND：先按 YAML land 点生成递减 z 航点受控下降，接地/近地后再 AUTO.LAND 停桨。"""
 
-        # ====================【重大修改】不再由 FSM 自己发 -0.12m/s 慢慢降到底 ====================
-        # 原逻辑：cmd.linear.z = -0.12，z <= home_z + 0.18 后直接 FINISH。
-        # 问题：PX4 可能还没判定 landed，此时直接 disarm 会出现 disarming denied。
-        # 新逻辑：FSM 只发布 /uav/land，请 mavros_sitl_bridge 执行：
-        #        AUTO.LAND -> 等 landed_state=ON_GROUND -> arming false -> 回传 DISARMED。
-        # =================================================================================
+        self.set_vision(False)
+        self.laser_off()
 
-        self.stop_motion()  # LAND 状态中不再继续给桥发送旧速度指令
-        self.laser_off()    # 降落阶段确保激光关闭
-
-        now = rospy.Time.now()  # 当前 ROS 时间
-
-        if (
-            not self.land_requested or
-            now - self.land_request_last_pub > rospy.Duration(1.0)
-        ):
-            self.land_pub.publish(Bool(data=True))
-            self.land_requested = True
-            self.land_request_last_pub = now
-            rospy.logwarn_throttle(1.0, "FSM LAND: publishing /uav/land=True, waiting for bridge DISARMED.")
-
-        if self.land_status == "DISARMED":  # bridge 已确认 PX4 上锁
-            rospy.logwarn("FSM LAND: bridge reports DISARMED, mission FINISH.")
+        # 已经请求最终 AUTO.LAND 后，不再继续发速度，只等待 bridge 回传 DISARMED。
+        if self.land_final_autoland_requested:
             self.stop_motion()
-            self.set_state("FINISH")
+            self.request_final_autoland_after_contact()
+
+            if self.land_status == "DISARMED":
+                rospy.logwarn("FSM LAND: bridge reports DISARMED, mission FINISH.")
+                self.stop_motion()
+                self.set_state("FINISH")
+                return
+
+            if self.state_elapsed() > self.land_finish_timeout:
+                rospy.logwarn_throttle(
+                    1.0,
+                    "FSM LAND timeout after final AUTO.LAND request: /uav/land_status=%s",
+                    self.land_status
+                )
             return
 
-        if self.state_elapsed() > self.land_finish_timeout:  # 超时只报警，不强行 FINISH
-            rospy.logwarn_throttle(1.0,
-                "FSM LAND timeout: still waiting for DISARMED, current /uav/land_status=%s",
-                self.land_status
+        if not self.land_descent_points:
+            self.build_land_descent_points()
+
+        if self.controlled_land_contact_detected():
+            self.stop_motion()
+            self.request_final_autoland_after_contact()
+            return
+
+        if self.land_descent_index >= len(self.land_descent_points):
+            # 已经走完所有递减 z 航点，但还没检测到接地；继续压住最后一级目标，等待近地/接地判断。
+            target = self.land_descent_points[-1]
+        else:
+            target = self.land_descent_points[self.land_descent_index]
+
+        if self.reached_and_hold(
+            target,
+            pos_eps=self.controlled_land_pos_eps,
+            z_eps=self.controlled_land_z_eps,
+            yaw_eps=self.controlled_land_yaw_eps,
+            hold_target=True
+        ):
+            self.land_descent_index += 1
+            rospy.loginfo(
+                "Controlled land descend step %d/%d reached.",
+                min(self.land_descent_index, len(self.land_descent_points)),
+                len(self.land_descent_points)
+            )
+            return
+
+        if self.arrive_hold_start is None:
+            self.goto_target(
+                target,
+                max_vel_z=self.controlled_land_max_vel_z,
+                max_acc_z=self.controlled_land_max_acc_z
             )
 
     def state_finish(self):

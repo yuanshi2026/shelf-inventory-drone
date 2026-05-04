@@ -114,7 +114,14 @@ class MavrosSITLBridge:
             Bool,
             self.land_callback,
             queue_size=5
-        )  # FSM 正常任务完成后发布 True，请求 PX4 AUTO.LAND
+        )  # FSM 受控下降接地/近地后发布 True，请求 PX4 AUTO.LAND 停桨/上锁
+
+        rospy.Subscriber(
+            "/uav/request_land",
+            Bool,
+            self.controlled_land_callback,
+            queue_size=5
+        )  # 急停悬停后的受控降落请求：释放 ABORT_HOVER，允许 FSM 继续发速度下降
 
         rospy.Subscriber(
             "/uav/disarm",
@@ -286,13 +293,33 @@ class MavrosSITLBridge:
         self.publish_land_status("IDLE")
     # ========================================================================
 
-    # ====================【新增】/uav/land 正常任务结束降落入口 ====================
+    # ====================【新增】/uav/request_land 受控降落入口 ====================
+    def controlled_land_callback(self, msg):
+        """急停悬停后，允许 FSM 接管速度，先递减 z 受控下降。
+
+        注意：这里不切 AUTO.LAND；真正的 AUTO.LAND 由 FSM 在接地/近地后发布 /uav/land 触发。
+        """
+        if not msg.data:
+            return
+
+        rospy.logwarn("/uav/request_land received. Release ABORT_HOVER for controlled descent; final /uav/land will stop props.")
+        self.abort_latched = False
+        self.abort_reason = ""
+        self.stop_requested = False
+        self.land_requested = False
+        self.disarm_requested = False
+        self.start_requested = True
+        self.last_cmd = self.zero_cmd()
+        self.last_cmd_time = rospy.Time.now()
+        self.publish_land_status("CONTROLLED_LAND")
+
+    # ====================【新增】/uav/land 最终 AUTO.LAND 停桨入口 ====================
     def land_callback(self, msg):
-        """请求 PX4 进入 AUTO.LAND；正常完成和急停悬停后都可以使用。"""
+        """请求 PX4 进入 AUTO.LAND；现在主要用于受控下降接地/近地后的停桨上锁。"""
         if msg.data:  # 收到 True 才执行降落流程
-            # ====================【本次安全修改 2026-05-03 5】急停后允许人工触发安全降落 ====================
-            # 如果已经处于 ABORT_HOVER，这里不会恢复旧任务，只是从悬停锁存转入 AUTO.LAND。
-            rospy.logwarn("/uav/land received. Switch PX4 to AUTO.LAND.")
+            # 注意：CMD:LAND 不应再直接打到 /uav/land。
+            # /uav/land 只作为受控下降接地/近地后的最终停桨上锁请求。
+            rospy.logwarn("/uav/land received. Final AUTO.LAND/disarm requested.")
             self.start_requested = False
             self.stop_requested = False
             self.land_requested = True

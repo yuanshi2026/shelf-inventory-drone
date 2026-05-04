@@ -28,6 +28,7 @@ class MissionManager:
         rospy.init_node("mission_manager_node")
 
         self.mode = "IDLE"  # IDLE / TASK1 / TASK2 / EMERGENCY
+        self.emergency_source_mode = "IDLE"  # 急停前的任务模式，用于 CMD:LAND 后恢复速度仲裁
         self.cmd_timeout = float(rospy.get_param("~cmd_timeout", 0.5))
         self.rate_hz = float(rospy.get_param("~rate_hz", 30.0))
 
@@ -66,6 +67,7 @@ class MissionManager:
         rospy.Subscriber("/uav/request_task1", Bool, self.request_task1_callback, queue_size=5)
         rospy.Subscriber("/uav/request_task2", Bool, self.request_task2_callback, queue_size=5)
         rospy.Subscriber("/uav/request_stop", Bool, self.request_stop_callback, queue_size=5)
+        rospy.Subscriber("/uav/request_land", Bool, self.request_land_callback, queue_size=5)
 
         # Reset and status signals used by e6 bridge/FSM1
         # UDP bridge should publish /uav/reset=True directly when receiving CMD:RESET.
@@ -152,10 +154,40 @@ class MissionManager:
             return
 
         rospy.logerr("Emergency stop requested: entering EMERGENCY mode and publishing /uav/stop=True")
+        if self.mode in ["TASK1", "TASK2"]:
+            self.emergency_source_mode = self.mode
         self.cmd_pub.publish(self.zero_cmd())
         self.publish_vision_enable(False)
         self.set_mode("EMERGENCY")
         self.stop_pub.publish(Bool(data=True))
+
+
+    def request_land_callback(self, msg):
+        """受控降落请求。
+
+        急停后 mission_manager 处于 EMERGENCY，不会转发任何任务速度。
+        CMD:LAND 现在先发布 /uav/request_land，让对应 FSM 走递减 z 受控降落，
+        所以这里需要临时恢复急停前的 TASK1/TASK2 速度通道。
+        """
+        if not msg.data:
+            return
+
+        if self.mode == "EMERGENCY":
+            if self.emergency_source_mode in ["TASK1", "TASK2"]:
+                rospy.logwarn(
+                    "Controlled land requested: restore velocity arbitration to %s.",
+                    self.emergency_source_mode
+                )
+                self.set_mode(self.emergency_source_mode)
+            else:
+                rospy.logwarn("Controlled land requested in EMERGENCY, but emergency_source_mode is unknown.")
+            return
+
+        if self.mode in ["TASK1", "TASK2"]:
+            rospy.logwarn("Controlled land requested while %s is active; keep current velocity channel.", self.mode)
+            return
+
+        rospy.logwarn("Controlled land request ignored: current mode is %s.", self.mode)
 
     def reset_callback(self, msg):
         """Return mission manager to IDLE after e6 bridge/FSM reset.
@@ -177,6 +209,7 @@ class MissionManager:
         rospy.logwarn("Mission reset accepted: manager returns to IDLE.")
         self.task1_cmd = self.zero_cmd()
         self.task2_cmd = self.zero_cmd()
+        self.emergency_source_mode = "IDLE"
         self.task1_vision_enable = False
         self.task2_vision_enable = False
         self.cmd_pub.publish(self.zero_cmd())
@@ -208,6 +241,7 @@ class MissionManager:
 
         if self.mode == "TASK1" and state == "EMERGENCY_STOP":
             rospy.logerr("TASK1 reported EMERGENCY_STOP: manager enters EMERGENCY.")
+            self.emergency_source_mode = "TASK1"
             self.cmd_pub.publish(self.zero_cmd())
             self.publish_vision_enable(False)
             self.set_mode("EMERGENCY")
@@ -223,6 +257,7 @@ class MissionManager:
 
         if self.mode == "TASK2" and state == "EMERGENCY_STOP":
             rospy.logerr("TASK2 reported EMERGENCY_STOP: manager enters EMERGENCY.")
+            self.emergency_source_mode = "TASK2"
             self.cmd_pub.publish(self.zero_cmd())
             self.publish_vision_enable(False)
             self.set_mode("EMERGENCY")

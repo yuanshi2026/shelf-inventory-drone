@@ -10,7 +10,7 @@ import rospy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
-from mavros_msgs.msg import State
+from mavros_msgs.msg import State, ExtendedState
 
 try:
     import rospkg
@@ -159,6 +159,21 @@ class Task2FSM:
         self.qr_fresh_timeout = float(self.routes.get("qr_fresh_timeout", 0.8))
         self.land_finish_timeout = float(self.routes.get("land_finish_timeout", 45.0))
 
+        # ====================【修改 2026-05-04】受控递减高度降落参数 ====================
+        # 降落流程：先回到 YAML land 点作为开始降落点，再生成 z 递减航点，
+        # 低速下降到接地/近地后，才发布 /uav/land=True 让 bridge AUTO.LAND 停桨上锁。
+        self.controlled_land_step = float(self.routes.get("controlled_land_step", 0.10))
+        self.controlled_land_final_height = float(self.routes.get("controlled_land_final_height", 0.04))
+        self.controlled_land_contact_height = float(self.routes.get("controlled_land_contact_height", 0.08))
+        self.controlled_land_max_vel_z = float(self.routes.get("controlled_land_max_vel_z", 0.06))
+        self.controlled_land_max_acc_z = float(self.routes.get("controlled_land_max_acc_z", 0.08))
+        self.controlled_land_pos_eps = float(self.routes.get("controlled_land_pos_eps", 0.08))
+        self.controlled_land_z_eps = float(self.routes.get("controlled_land_z_eps", 0.04))
+        self.controlled_land_yaw_eps = math.radians(
+            float(self.routes.get("controlled_land_yaw_eps_deg", 8.0))
+        )
+        # ==========================================================================
+
         self.inventory_map_path = rospy.get_param(
             "~inventory_map_path",
             self.default_inventory_map_path()
@@ -184,6 +199,8 @@ class Task2FSM:
         rospy.Subscriber("/uav/stop", Bool, self.stop_callback, queue_size=5)
         rospy.Subscriber("/uav/reset", Bool, self.reset_callback, queue_size=5)
         rospy.Subscriber("/mavros/state", State, self.mavros_state_callback, queue_size=10)
+        rospy.Subscriber("/mavros/extended_state", ExtendedState, self.extended_state_callback, queue_size=10)
+        rospy.Subscriber("/uav/request_land", Bool, self.request_land_callback, queue_size=5)
         rospy.Subscriber("/uav/land_status", String, self.land_status_callback, queue_size=10)
         rospy.Subscriber("/qr/result", String, self.qr_callback, queue_size=20)
         rospy.Subscriber("/inventory/result", String, self.inventory_result_callback, queue_size=50)
@@ -205,6 +222,8 @@ class Task2FSM:
         self.emergency_stop_last_pub = rospy.Time(0)
         self.mavros_state = State()
         self.mavros_state_ok = False
+        self.extended_state = ExtendedState()
+        self.extended_state_ok = False
         self.arrive_hold_start = None
         self.smooth_cmd = Twist()
         self.last_control_time = rospy.Time.now()
@@ -227,6 +246,12 @@ class Task2FSM:
         self.land_requested = False
         self.land_request_last_pub = rospy.Time(0)
         self.land_status = "IDLE"
+
+        # 受控降落内部状态
+        self.land_descent_points = []
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False
+        self.external_land_requested = False
 
         # 视觉使能去重：只在 True/False 状态真正变化时发布，避免反复触发 qr_vision_node 的使能拍照。
         self.last_vision_enable = None
@@ -287,6 +312,9 @@ class Task2FSM:
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
+            self.land_descent_points = []
+            self.land_descent_index = 0
+            self.land_final_autoland_requested = False
 
         # 扫码相关状态才打开视觉；飞行、停稳、降落、急停都关闭视觉。
         if new_state in ["SCAN_TARGET_ID", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "VERIFY_TARGET"]:
@@ -409,6 +437,35 @@ class Task2FSM:
         self.mavros_state = msg
         self.mavros_state_ok = True
 
+    def extended_state_callback(self, msg):
+        self.extended_state = msg
+        self.extended_state_ok = True
+
+    def request_land_callback(self, msg):
+        """人工请求受控降落。主要用于急停悬停后：先降到地面，再让 bridge AUTO.LAND 停桨。"""
+        if not msg.data:
+            return
+
+        if self.state in ["IDLE", "FINISH"] and not self.emergency_latched:
+            rospy.logwarn("TASK2 controlled land request ignored: FSM2 is %s.", self.state)
+            return
+
+        rospy.logwarn("TASK2 controlled land requested: go to YAML land point, descend by z waypoints, then AUTO.LAND/disarm.")
+        self.external_land_requested = True
+        self.stop_requested = False
+
+        if self.emergency_latched:
+            self.emergency_latched = False
+
+        self.scan_hold_target = None
+        self.land_descent_points = []
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False
+        self.land_requested = False
+        self.land_status = "IDLE"
+        self.route_index = 0
+        self.set_state("RETURN_ROUTE")
+
     def reset_callback(self, msg):
         if not msg.data:
             return
@@ -433,6 +490,10 @@ class Task2FSM:
         self.result_sent = False
         self.land_requested = False
         self.land_status = "IDLE"
+        self.land_descent_points = []
+        self.land_descent_index = 0
+        self.land_final_autoland_requested = False
+        self.external_land_requested = False
         self.arrive_hold_start = None
         self.smooth_cmd = Twist()
         self.last_control_time = rospy.Time.now()
@@ -865,13 +926,18 @@ class Task2FSM:
     def run(self):
         while not rospy.is_shutdown():
             if self.emergency_latched:
-                self.set_vision(False)
-                self.laser_off()
-                self.stop_motion()
-                self.publish_stop_to_bridge()
-                self.set_state("EMERGENCY_STOP")
-                self.loop_rate.sleep()
-                continue
+                if self.external_land_requested:
+                    self.emergency_latched = False
+                    self.stop_requested = False
+                    self.set_state("RETURN_ROUTE")
+                else:
+                    self.set_vision(False)
+                    self.laser_off()
+                    self.stop_motion()
+                    self.publish_stop_to_bridge()
+                    self.set_state("EMERGENCY_STOP")
+                    self.loop_rate.sleep()
+                    continue
 
             if self.stop_requested:
                 self.trigger_emergency_stop()
@@ -879,7 +945,11 @@ class Task2FSM:
                 continue
 
             # SCAN_TARGET_ID 是起飞前原地扫码流程，不要求 mission_manager 切到 TASK2。
-            if self.mode != "TASK2" and self.state not in ["IDLE", "FINISH", "SCAN_TARGET_ID"]:
+            if (
+                self.mode != "TASK2" and
+                not self.external_land_requested and
+                self.state not in ["IDLE", "FINISH", "SCAN_TARGET_ID"]
+            ):
                 self.set_vision(False)
                 self.stop_motion()
                 self.set_state("IDLE")
@@ -1126,6 +1196,74 @@ class Task2FSM:
             self.route_index = 0
             self.set_state("RETURN_ROUTE")
 
+    def get_ground_z(self):
+        """返回起飞地面对应的飞控 z。"""
+        return self.home_z + self.camera_initial_height
+
+    def px4_reports_on_ground(self):
+        return (
+            self.extended_state_ok and
+            self.extended_state.landed_state == ExtendedState.LANDED_STATE_ON_GROUND
+        )
+
+    def controlled_land_contact_detected(self):
+        """优先用 PX4 landed_state 判断接地；否则用起飞地面高度 + 阈值近似判断。"""
+        if self.px4_reports_on_ground():
+            return True
+        ground_z = self.get_ground_z()
+        return self.z <= ground_z + self.controlled_land_contact_height
+
+    def make_land_target(self):
+        """生成 YAML land 点对应的 local 目标。"""
+        return self.resolve_point(self.land_point)
+
+    def build_land_descent_points(self):
+        """从 YAML land 点生成 z 逐级递减的降落航点。"""
+        land_target = self.make_land_target()
+        ground_z = self.get_ground_z()
+        final_z = ground_z + self.controlled_land_final_height
+
+        start_z = float(land_target["z"])
+        if start_z < final_z:
+            start_z = self.z
+
+        z = start_z
+        points = []
+        step = max(0.02, abs(self.controlled_land_step))
+
+        while z - step > final_z:
+            z -= step
+            p = deepcopy(land_target)
+            p["z"] = z
+            points.append(p)
+
+        final_point = deepcopy(land_target)
+        final_point["z"] = final_z
+        points.append(final_point)
+
+        self.land_descent_points = points
+        self.land_descent_index = 0
+        rospy.logwarn(
+            "TASK2 controlled land path built: start_z=%.2f final_z=%.2f ground_z=%.2f points=%d",
+            start_z, final_z, ground_z, len(points)
+        )
+
+    def request_final_autoland_after_contact(self):
+        """接地/近地后请求 bridge 执行 AUTO.LAND + 停桨上锁。"""
+        now = rospy.Time.now()
+        if (
+            not self.land_final_autoland_requested or
+            now - self.land_request_last_pub > rospy.Duration(1.0)
+        ):
+            self.land_pub.publish(Bool(data=True))
+            self.land_requested = True
+            self.land_final_autoland_requested = True
+            self.land_request_last_pub = now
+            rospy.logwarn_throttle(
+                1.0,
+                "TASK2 controlled land contact/near-ground reached. Publishing /uav/land=True for AUTO.LAND/disarm."
+            )
+
     def state_return_route(self):
         self.set_vision(False)
         self.scan_hold_target = None
@@ -1151,21 +1289,61 @@ class Task2FSM:
             self.goto_target(target)
 
     def state_land(self):
+        """LAND：先按 YAML land 点生成递减 z 航点受控下降，接地/近地后再 AUTO.LAND 停桨。"""
         self.set_vision(False)
         self.laser_off()
-        self.stop_motion()
-        now = rospy.Time.now()
-        if (not self.land_requested) or (now - self.land_request_last_pub > rospy.Duration(1.0)):
-            self.land_pub.publish(Bool(data=True))
-            self.land_requested = True
-            self.land_request_last_pub = now
-            rospy.logwarn_throttle(1.0, "TASK2 LAND: publishing /uav/land=True, waiting for DISARMED.")
-        if self.land_status == "DISARMED":
+
+        if self.land_final_autoland_requested:
             self.stop_motion()
-            self.set_state("FINISH")
+            self.request_final_autoland_after_contact()
+
+            if self.land_status == "DISARMED":
+                self.stop_motion()
+                self.set_state("FINISH")
+                return
+
+            if self.state_elapsed() > self.land_finish_timeout:
+                rospy.logwarn_throttle(
+                    1.0,
+                    "TASK2 LAND timeout after final AUTO.LAND request, current land_status=%s",
+                    self.land_status
+                )
             return
-        if self.state_elapsed() > self.land_finish_timeout:
-            rospy.logwarn_throttle(1.0, "TASK2 LAND timeout, current land_status=%s", self.land_status)
+
+        if not self.land_descent_points:
+            self.build_land_descent_points()
+
+        if self.controlled_land_contact_detected():
+            self.stop_motion()
+            self.request_final_autoland_after_contact()
+            return
+
+        if self.land_descent_index >= len(self.land_descent_points):
+            target = self.land_descent_points[-1]
+        else:
+            target = self.land_descent_points[self.land_descent_index]
+
+        if self.reached_and_hold(
+            target,
+            pos_eps=self.controlled_land_pos_eps,
+            z_eps=self.controlled_land_z_eps,
+            yaw_eps=self.controlled_land_yaw_eps,
+            hold_target=True
+        ):
+            self.land_descent_index += 1
+            rospy.loginfo(
+                "TASK2 controlled land descend step %d/%d reached.",
+                min(self.land_descent_index, len(self.land_descent_points)),
+                len(self.land_descent_points)
+            )
+            return
+
+        if self.arrive_hold_start is None:
+            self.goto_target(
+                target,
+                max_vel_z=self.controlled_land_max_vel_z,
+                max_acc_z=self.controlled_land_max_acc_z
+            )
 
     def state_finish(self):
         self.scan_hold_target = None
