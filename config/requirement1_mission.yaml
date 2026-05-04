@@ -1,5 +1,4 @@
 mission:
-  # 【修改 2026-05-04】扫描点与货架中心线距离由 0.50m 调整为 0.53m。
   # 是否使用起飞点作为相对坐标原点
   use_relative: true
 
@@ -24,6 +23,18 @@ mission:
   max_vel_xy: 0.25
   max_vel_z: 0.18
   max_yaw_rate: 0.40
+
+  # 平移/旋转分离控制：
+  # 平移段只移动 x/y/z，yaw 只小幅保持；旋转段锁住 x/y/z 原地转向。
+  motion_split_enable: true
+  translate_yaw_hold_threshold_deg: 25.0
+  translate_yaw_hold_max_rate: 0.16
+  rotate_lock_kp_xy: 0.30
+  rotate_lock_kp_z: 0.40
+  rotate_lock_max_vel_xy: 0.06
+  rotate_lock_max_vel_z: 0.04
+  rotate_lock_deadband_xy: 0.025
+  rotate_lock_deadband_z: 0.025
 
   # 激光点在图像中的像素坐标
   laser_u: 320
@@ -59,18 +70,23 @@ mission:
   # A=0.22, B=1.28, C=2.22, D=3.28。
   # 进入每个面的最后一个 safe 点与该面的第一个 scan 点保持相同 x/z/yaw，
   # 因此 safe -> scan 只发生 y 方向移动。
+  # 本版修正货架编号映射：
+  # A/C 面从 z=1.40 高层进入时，沿 y 正方向看到的顺序为 3->2->1，
+  # 再下降到 z=1.00 后沿 y 反方向扫 4->5->6；
+  # B/D 面从 z=1.00 低层进入时，顺序保持 4->5->6->3->2->1。
   points:
-    # 起飞后进入左货架下方安全通道；第二个 safe 与 A1 只差 y 坐标
+    # 起飞后进入左货架下方安全通道；第二个 safe 与 A3 只差 y 坐标
     - {type: safe, x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
     - {type: safe, x: 0.22, y: 0.25, z: 1.40, yaw: 0.0}
 
     # A 面：左货架左侧，距离左货架中心线 x=0.75 约 0.53m
-    - {type: scan, face: A, slot: 1, x: 0.22, y: 0.75, z: 1.40, yaw: 0.0}
+    # 修正映射：从 z=1.40 进入 A/C 面时，扫描顺序为 3->2->1->4->5->6。
+    - {type: scan, face: A, slot: 3, x: 0.22, y: 0.75, z: 1.40, yaw: 0.0}
     - {type: scan, face: A, slot: 2, x: 0.22, y: 1.25, z: 1.40, yaw: 0.0}
-    - {type: scan, face: A, slot: 3, x: 0.22, y: 1.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: A, slot: 6, x: 0.22, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 1, x: 0.22, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 4, x: 0.22, y: 1.75, z: 1.00, yaw: 0.0}
     - {type: scan, face: A, slot: 5, x: 0.22, y: 1.25, z: 1.00, yaw: 0.0}
-    - {type: scan, face: A, slot: 4, x: 0.22, y: 0.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 6, x: 0.22, y: 0.75, z: 1.00, yaw: 0.0}
 
     # A 面 -> B 面：从左货架下端红杆外侧绕行；最后一个 safe 与 B4 只差 y 坐标
     - {type: safe, x: 0.22, y: -0.10, z: 1.00, yaw: 0.0}
@@ -85,17 +101,20 @@ mission:
     - {type: scan, face: B, slot: 2, x: 1.28, y: 1.25, z: 1.40, yaw: 3.1416}
     - {type: scan, face: B, slot: 1, x: 1.28, y: 0.75, z: 1.40, yaw: 3.1416}
 
-    # B 面 -> C 面：从两货架之间下方通道转到 C 面；最后一个 safe 与 C1 只差 y 坐标
+    # B 面 -> C 面：先保持 B 面 yaw=3.1416 平移退出到通道，再原地旋转回 yaw=0.0，最后平移到 C 面。
+    # 最后一个 safe 与 C3 只差 y 坐标。
+    - {type: safe, x: 1.28, y: -0.10, z: 1.40, yaw: 3.1416}
     - {type: safe, x: 1.28, y: -0.10, z: 1.40, yaw: 0.0}
     - {type: safe, x: 2.22, y: -0.10, z: 1.40, yaw: 0.0}
 
     # C 面：右货架左侧，距离右货架中心线 x=2.75 约 0.53m
-    - {type: scan, face: C, slot: 1, x: 2.22, y: 0.75, z: 1.40, yaw: 0.0}
+    # 修正映射：从 z=1.40 进入 A/C 面时，扫描顺序为 3->2->1->4->5->6。
+    - {type: scan, face: C, slot: 3, x: 2.22, y: 0.75, z: 1.40, yaw: 0.0}
     - {type: scan, face: C, slot: 2, x: 2.22, y: 1.25, z: 1.40, yaw: 0.0}
-    - {type: scan, face: C, slot: 3, x: 2.22, y: 1.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: C, slot: 6, x: 2.22, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 1, x: 2.22, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 4, x: 2.22, y: 1.75, z: 1.00, yaw: 0.0}
     - {type: scan, face: C, slot: 5, x: 2.22, y: 1.25, z: 1.00, yaw: 0.0}
-    - {type: scan, face: C, slot: 4, x: 2.22, y: 0.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 6, x: 2.22, y: 0.75, z: 1.00, yaw: 0.0}
 
     # C 面 -> D 面：从右货架下端红杆外侧绕行；最后一个 safe 与 D4 只差 y 坐标
     - {type: safe, x: 2.22, y: -0.10, z: 1.00, yaw: 0.0}
