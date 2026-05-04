@@ -85,6 +85,12 @@ class MavrosSITLBridge:
             self.start_callback,
             queue_size=5
         )  # 订阅一键启动信号
+        rospy.Subscriber(
+            "/uav/start_task2",
+            Bool,
+            self.start_callback,
+            queue_size=5
+        )  # 订阅任务2启动信号
 
         rospy.Subscriber(
             "/uav/stop",
