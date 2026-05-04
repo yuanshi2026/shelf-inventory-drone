@@ -580,12 +580,17 @@ class Requirement1FSM:
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
 
-        # ====================【新增】根据 FSM 状态控制视觉节点 ====================
-        if new_state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
+        # ====================【修改 2026-05-04】根据 FSM 状态控制视觉节点 ====================
+        # 关键修正：HOVER_BEFORE_SCAN 也打开视觉。
+        # 原因：qr_vision_node 只有收到 /vision/enable=True 后才开始取图/保存使能快照；
+        # 如果停稳阶段一直发 False，实飞时队友会看到相机没有拍照。
+        # 注意：HOVER_BEFORE_SCAN 阶段虽然打开视觉，但 FSM 不使用二维码结果；
+        # 进入 SEARCH_QR 前仍会清空旧 qr，避免提前识别结果误触发。
+        if new_state in ["HOVER_BEFORE_SCAN", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
             self.set_vision(True)
         else:
             self.set_vision(False)
-        # ===============================================================
+        # =================================================================================
 
         # ====================【实飞稳定修改 2026-05-03】进入新目标状态时重置到点稳定计时 ====================
         if new_state in ["TAKEOFF", "GOTO_MISSION_POINT", "RETURN_LAND"]:
@@ -1230,7 +1235,10 @@ class Requirement1FSM:
     def state_hover_before_scan(self):
         """HOVER_BEFORE_SCAN：进入扫码点后先纯悬停，等机体真的停稳再打开视觉。"""
 
-        self.set_vision(False)   # 停稳阶段不识别，避免视觉结果提前触发对准动作
+        # ====================【修改 2026-05-04】停稳阶段也打开视觉使能 ====================
+        # 这里打开视觉只是让相机开始取图/保存快照；本状态不判断 fresh_qr_found()。
+        # 进入 SEARCH_QR 前会清空 qr 缓存，所以不会因为提前识别而误触发。
+        self.set_vision(True)
         self.hold_scan_position() # 持续锁定任务 x/y/z/yaw，而不是只发 0 速度
 
         elapsed = self.state_elapsed()
@@ -1429,7 +1437,9 @@ class Requirement1FSM:
 
     def state_finish(self):
         """FINISH：任务完成。"""
-        self.set_vision(False)
+        # ====================【修改 2026-05-04】不要在 FINISH 中循环发布 /vision/enable=False ====================
+        # 进入 FINISH 时 set_state() 已经发布过一次 False。
+        # 如果这里继续 30Hz 发布 False，后续启动任务2时会把任务2的视觉 True 抢掉，导致相机不拍照。
         self.stop_motion()
         self.laser_off()
 
