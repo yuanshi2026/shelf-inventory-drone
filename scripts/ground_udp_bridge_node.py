@@ -69,10 +69,10 @@ class GroundUDPBridge:
         )  # 任务 2 指定目标货物编号，给 task2_fsm_node 使用
 
         self.land_pub = rospy.Publisher(
-            "/uav/land",
+            "/uav/request_land",
             Bool,
             queue_size=5
-        )  # e6 MAVROS 桥：急停悬停后，人工确认安全降落
+        )  # 受控降落请求：先交给 FSM/mission_manager 走递减 z 降落，接地后 FSM 再发布 /uav/land 给 bridge 停桨
 
         self.target_scan_pub = rospy.Publisher(
             "/uav/scan_target",
@@ -326,13 +326,16 @@ class GroundUDPBridge:
             # ================================================================================
             return
 
-        if text == "CMD:LAND":  # 安全降落：急停悬停后，人工确认安全再请求 AUTO.LAND
+        if text == "CMD:LAND":  # 安全降落：急停悬停后，人工确认安全再请求受控递减高度降落
             self.task1_running = False
             self.task2_running = False
 
             self.send_udp("STATUS:LANDING")
-            self.send_udp("REPLY:LAND_REQUESTED")
+            self.send_udp("REPLY:CONTROLLED_LAND_REQUESTED")
 
+            # 不再直接发布 /uav/land，避免 bridge 立即切 AUTO.LAND 造成大角度扭转。
+            # 这里发布 /uav/request_land，由 FSM 先飞到 YAML land 点并逐级降高；
+            # 接地/近地后 FSM 再发布 /uav/land 给 bridge 停桨/上锁。
             self.publish_bool_repeated(self.land_pub, True)
             return
 
