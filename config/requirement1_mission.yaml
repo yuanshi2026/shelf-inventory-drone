@@ -1,4 +1,5 @@
 mission:
+  # 【修改 2026-05-04】扫描点与货架中心线距离由 0.50m 调整为 0.53m。
   # 是否使用起飞点作为相对坐标原点
   use_relative: true
 
@@ -54,57 +55,57 @@ mission:
   # type=safe 表示安全过渡点；type=scan 表示盘点点
   # yaw=0.0 面向赛场 +X；yaw=3.1416 面向赛场 -X
   # 两个货架中心线约为 x=0.75 / x=2.75。
-  # 本版将扫码时机体中心到货架中心线的距离改为 0.50m：
-  # A=0.25, B=1.25, C=2.25, D=3.25。
+  # 本版将扫码时机体中心到货架中心线的距离改为 0.53m：
+  # A=0.22, B=1.28, C=2.22, D=3.28。
   # 进入每个面的最后一个 safe 点与该面的第一个 scan 点保持相同 x/z/yaw，
   # 因此 safe -> scan 只发生 y 方向移动。
   points:
     # 起飞后进入左货架下方安全通道；第二个 safe 与 A1 只差 y 坐标
     - {type: safe, x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
-    - {type: safe, x: 0.25, y: 0.25, z: 1.40, yaw: 0.0}
+    - {type: safe, x: 0.22, y: 0.25, z: 1.40, yaw: 0.0}
 
-    # A 面：左货架左侧，距离左货架中心线 x=0.75 约 0.50m
-    - {type: scan, face: A, slot: 1, x: 0.25, y: 0.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: A, slot: 2, x: 0.25, y: 1.25, z: 1.40, yaw: 0.0}
-    - {type: scan, face: A, slot: 3, x: 0.25, y: 1.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: A, slot: 6, x: 0.25, y: 1.75, z: 1.00, yaw: 0.0}
-    - {type: scan, face: A, slot: 5, x: 0.25, y: 1.25, z: 1.00, yaw: 0.0}
-    - {type: scan, face: A, slot: 4, x: 0.25, y: 0.75, z: 1.00, yaw: 0.0}
+    # A 面：左货架左侧，距离左货架中心线 x=0.75 约 0.53m
+    - {type: scan, face: A, slot: 1, x: 0.22, y: 0.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 2, x: 0.22, y: 1.25, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 3, x: 0.22, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: A, slot: 6, x: 0.22, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 5, x: 0.22, y: 1.25, z: 1.00, yaw: 0.0}
+    - {type: scan, face: A, slot: 4, x: 0.22, y: 0.75, z: 1.00, yaw: 0.0}
 
     # A 面 -> B 面：从左货架下端红杆外侧绕行；最后一个 safe 与 B4 只差 y 坐标
-    - {type: safe, x: 0.25, y: -0.10, z: 1.00, yaw: 0.0}
-    - {type: safe, x: 1.25, y: -0.10, z: 1.00, yaw: 0.0}
-    - {type: safe, x: 1.25, y: -0.10, z: 1.00, yaw: 3.1416}
+    - {type: safe, x: 0.22, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 1.28, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 1.28, y: -0.10, z: 1.00, yaw: 3.1416}
 
-    # B 面：左货架右侧，距离左货架中心线 x=0.75 约 0.50m
-    - {type: scan, face: B, slot: 4, x: 1.25, y: 0.75, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: B, slot: 5, x: 1.25, y: 1.25, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: B, slot: 6, x: 1.25, y: 1.75, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: B, slot: 3, x: 1.25, y: 1.75, z: 1.40, yaw: 3.1416}
-    - {type: scan, face: B, slot: 2, x: 1.25, y: 1.25, z: 1.40, yaw: 3.1416}
-    - {type: scan, face: B, slot: 1, x: 1.25, y: 0.75, z: 1.40, yaw: 3.1416}
+    # B 面：左货架右侧，距离左货架中心线 x=0.75 约 0.53m
+    - {type: scan, face: B, slot: 4, x: 1.28, y: 0.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 5, x: 1.28, y: 1.25, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 6, x: 1.28, y: 1.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: B, slot: 3, x: 1.28, y: 1.75, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: B, slot: 2, x: 1.28, y: 1.25, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: B, slot: 1, x: 1.28, y: 0.75, z: 1.40, yaw: 3.1416}
 
     # B 面 -> C 面：从两货架之间下方通道转到 C 面；最后一个 safe 与 C1 只差 y 坐标
-    - {type: safe, x: 1.25, y: -0.10, z: 1.40, yaw: 0.0}
-    - {type: safe, x: 2.25, y: -0.10, z: 1.40, yaw: 0.0}
+    - {type: safe, x: 1.28, y: -0.10, z: 1.40, yaw: 0.0}
+    - {type: safe, x: 2.22, y: -0.10, z: 1.40, yaw: 0.0}
 
-    # C 面：右货架左侧，距离右货架中心线 x=2.75 约 0.50m
-    - {type: scan, face: C, slot: 1, x: 2.25, y: 0.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: C, slot: 2, x: 2.25, y: 1.25, z: 1.40, yaw: 0.0}
-    - {type: scan, face: C, slot: 3, x: 2.25, y: 1.75, z: 1.40, yaw: 0.0}
-    - {type: scan, face: C, slot: 6, x: 2.25, y: 1.75, z: 1.00, yaw: 0.0}
-    - {type: scan, face: C, slot: 5, x: 2.25, y: 1.25, z: 1.00, yaw: 0.0}
-    - {type: scan, face: C, slot: 4, x: 2.25, y: 0.75, z: 1.00, yaw: 0.0}
+    # C 面：右货架左侧，距离右货架中心线 x=2.75 约 0.53m
+    - {type: scan, face: C, slot: 1, x: 2.22, y: 0.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 2, x: 2.22, y: 1.25, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 3, x: 2.22, y: 1.75, z: 1.40, yaw: 0.0}
+    - {type: scan, face: C, slot: 6, x: 2.22, y: 1.75, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 5, x: 2.22, y: 1.25, z: 1.00, yaw: 0.0}
+    - {type: scan, face: C, slot: 4, x: 2.22, y: 0.75, z: 1.00, yaw: 0.0}
 
     # C 面 -> D 面：从右货架下端红杆外侧绕行；最后一个 safe 与 D4 只差 y 坐标
-    - {type: safe, x: 2.25, y: -0.10, z: 1.00, yaw: 0.0}
-    - {type: safe, x: 3.25, y: -0.10, z: 1.00, yaw: 0.0}
-    - {type: safe, x: 3.25, y: -0.10, z: 1.00, yaw: 3.1416}
+    - {type: safe, x: 2.22, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 3.28, y: -0.10, z: 1.00, yaw: 0.0}
+    - {type: safe, x: 3.28, y: -0.10, z: 1.00, yaw: 3.1416}
 
-    # D 面：右货架右侧，距离右货架中心线 x=2.75 约 0.50m
-    - {type: scan, face: D, slot: 4, x: 3.25, y: 0.75, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: D, slot: 5, x: 3.25, y: 1.25, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: D, slot: 6, x: 3.25, y: 1.75, z: 1.00, yaw: 3.1416}
-    - {type: scan, face: D, slot: 3, x: 3.25, y: 1.75, z: 1.40, yaw: 3.1416}
-    - {type: scan, face: D, slot: 2, x: 3.25, y: 1.25, z: 1.40, yaw: 3.1416}
-    - {type: scan, face: D, slot: 1, x: 3.25, y: 0.75, z: 1.40, yaw: 3.1416}
+    # D 面：右货架右侧，距离右货架中心线 x=2.75 约 0.53m
+    - {type: scan, face: D, slot: 4, x: 3.28, y: 0.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 5, x: 3.28, y: 1.25, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 6, x: 3.28, y: 1.75, z: 1.00, yaw: 3.1416}
+    - {type: scan, face: D, slot: 3, x: 3.28, y: 1.75, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: D, slot: 2, x: 3.28, y: 1.25, z: 1.40, yaw: 3.1416}
+    - {type: scan, face: D, slot: 1, x: 3.28, y: 0.75, z: 1.40, yaw: 3.1416}
