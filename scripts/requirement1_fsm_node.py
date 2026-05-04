@@ -254,12 +254,14 @@ class Requirement1FSM:
             queue_size=20
         ) # FSM 状态发布器
 
-        # ====================【新增】视觉节点使能控制 ====================
+        # ====================【修改】视觉节点使能请求 ====================
+        # 不再直接发布 /vision/enable，避免和任务2 FSM 抢同一个话题。
+        # 本节点只发布 /task1/vision_enable，最终由 mission_manager_node 仲裁后再发布 /vision/enable。
         self.vision_enable_pub = rospy.Publisher(
-            "/vision/enable",
+            "/task1/vision_enable",
             Bool,
             queue_size=5
-        ) # 扫码相关状态打开视觉节点，其它状态关闭，避免视觉算法常驻占资源
+        ) # 任务1视觉使能请求
         # ===============================================================
 
         # ====================【新增】正常任务完成后请求 mavros_sitl_bridge 自动降落/上锁 ====================
@@ -407,6 +409,11 @@ class Requirement1FSM:
         self.mavros_state_ok = False              # 是否已经收到过 /mavros/state
         self.emergency_stop_last_pub = rospy.Time(0) # 上次向 bridge 重发 /uav/stop 的时间
         # =================================================================================
+
+        # ====================【修改】视觉使能去重 ====================
+        # 只在 True/False 状态真正变化时发布，避免反复触发 qr_vision_node 的“使能拍照”。
+        self.last_vision_enable = None
+        # ============================================================
         # ================================================================================================================================================
         
         
@@ -419,8 +426,19 @@ class Requirement1FSM:
         self.state_pub.publish(String(data=self.state))
 
     def set_vision(self, enabled):
-        """控制二维码视觉节点是否执行识别。"""
-        self.vision_enable_pub.publish(Bool(data=bool(enabled)))
+        """发布任务1视觉使能请求。
+
+        注意：本节点不再直接控制 /vision/enable，而是发布到 /task1/vision_enable。
+        mission_manager_node 会根据当前任务模式进行仲裁，最终只让当前任务控制视觉节点。
+        同时这里做去重，避免重复 True/False 触发 qr_vision_node 连续保存使能快照。
+        """
+        enabled = bool(enabled)
+
+        if self.last_vision_enable == enabled:
+            return
+
+        self.last_vision_enable = enabled
+        self.vision_enable_pub.publish(Bool(data=enabled))
 
     def mavros_state_callback(self, msg):
         """保存 MAVROS armed/mode 状态，用于限制 /uav/reset 只能在已上锁后生效。"""
