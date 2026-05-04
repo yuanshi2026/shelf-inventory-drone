@@ -1316,12 +1316,23 @@ class Requirement1FSM:
             self.set_state("LASER_FLASH")
             return
 
-        if self.state_elapsed() > self.align_timeout:  # 对准超时则记录失败
-            rospy.logwarn("QR align timeout.")
+        if self.state_elapsed() > self.align_timeout:  # 对准超时：二维码已识别，仍然点亮激光并上传结果
+            # ====================【修改 2026-05-04】对齐失败不再丢弃扫码结果 ====================
+            # 逻辑说明：
+            #   能进入 ALIGN_QR，说明 SEARCH_QR 阶段已经读到了二维码编号；
+            #   对齐超时只代表激光点没有完全对到二维码中心，不能代表二维码识别失败。
+            #   按当前比赛展示需求：即使对齐失败，也要点亮激光，并把已识别到的二维码编号上传地面站。
+            # 后续流程：
+            #   LASER_FLASH 会打开 /laser/cmd；
+            #   SEND_RESULT 会 publish_inventory_result(status="OK")，地面站收到 SCAN:faceSlot:id。
+            rospy.logwarn(
+                "QR align timeout, but QR id=%d has been detected. Flash laser and send scan result.",
+                int(self.qr["id"])
+            )
             self.stop_motion()
-            self.publish_inventory_result(status="FAIL")
-            self.set_state("NEXT_POINT")
+            self.set_state("LASER_FLASH")
             return
+            # ===========================================================================
 
         self.visual_align()
 

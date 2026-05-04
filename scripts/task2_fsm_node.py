@@ -138,6 +138,8 @@ class Task2FSM:
 
         self.search_timeout = float(self.routes.get("search_timeout", 3.0))
         self.align_timeout = float(self.routes.get("align_timeout", 4.0))
+        # 任务2找到目标二维码后也点亮激光；对齐成功/对齐超时都会进入 LASER_FLASH。
+        self.laser_flash_time = float(self.routes.get("laser_flash_time", 0.5))
         self.verify_timeout = float(self.routes.get("verify_timeout", 1.0))
         self.qr_fresh_timeout = float(self.routes.get("qr_fresh_timeout", 0.8))
         self.land_finish_timeout = float(self.routes.get("land_finish_timeout", 45.0))
@@ -155,6 +157,7 @@ class Task2FSM:
         self.target_id_pub = rospy.Publisher("/target/id", String, queue_size=10)
         self.land_pub = rospy.Publisher("/uav/land", Bool, queue_size=5)
         self.stop_pub = rospy.Publisher("/uav/stop", Bool, queue_size=5)
+        self.laser_pub = rospy.Publisher("/laser/cmd", Bool, queue_size=10)
 
         rospy.Subscriber(self.odom_topic, Odometry, self.odom_callback, queue_size=20)
         rospy.Subscriber("/mission/mode", String, self.mode_callback, queue_size=10)
@@ -199,6 +202,7 @@ class Task2FSM:
         self.target_route_from_face = []
         self.route_index = 0
         self.result_sent = False
+        self.laser_started = False
 
         self.qr = {"found": False, "id": -1, "u": -1.0, "v": -1.0, "area": 0.0}
         self.qr_stamp = rospy.Time(0)
@@ -210,6 +214,7 @@ class Task2FSM:
         self.loop_rate = rospy.Rate(30)
         rospy.loginfo("task2_fsm_node started. cmd_vel=%s odom=%s", self.cmd_vel_topic, self.odom_topic)
         self.set_vision(False)
+        self.laser_off()
         self.state_pub.publish(String(data=self.state))
 
     def default_inventory_map_path(self):
@@ -255,13 +260,16 @@ class Task2FSM:
         self.state_enter_time = rospy.Time.now()
         self.state_pub.publish(String(data=self.state))
 
+        if new_state == "LASER_FLASH":
+            self.laser_started = False
+
         if new_state == "LAND":
             self.land_requested = False
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
 
         # 扫码相关状态才打开视觉；飞行、停稳、降落、急停都关闭视觉。
-        if new_state in ["SCAN_TARGET_ID", "SEARCH_QR", "ALIGN_QR", "VERIFY_TARGET"]:
+        if new_state in ["SCAN_TARGET_ID", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "VERIFY_TARGET"]:
             self.set_vision(True)
         else:
             self.set_vision(False)
@@ -280,6 +288,14 @@ class Task2FSM:
 
     def set_vision(self, enabled):
         self.vision_enable_pub.publish(Bool(data=bool(enabled)))
+
+    def laser_on(self):
+        """打开激光。"""
+        self.laser_pub.publish(Bool(data=True))
+
+    def laser_off(self):
+        """关闭激光。"""
+        self.laser_pub.publish(Bool(data=False))
 
     def stop_motion(self):
         self.smooth_cmd = Twist()
@@ -392,6 +408,7 @@ class Task2FSM:
         self.qr_stamp = rospy.Time(0)
         self.set_vision(False)
         self.stop_motion()
+        self.laser_off()
         self.set_state("IDLE")
 
     def land_status_callback(self, msg):
@@ -796,6 +813,7 @@ class Task2FSM:
         while not rospy.is_shutdown():
             if self.emergency_latched:
                 self.set_vision(False)
+                self.laser_off()
                 self.stop_motion()
                 self.publish_stop_to_bridge()
                 self.set_state("EMERGENCY_STOP")
@@ -838,6 +856,8 @@ class Task2FSM:
                 self.state_search_qr()
             elif self.state == "ALIGN_QR":
                 self.state_align_qr()
+            elif self.state == "LASER_FLASH":
+                self.state_laser_flash()
             elif self.state == "VERIFY_TARGET":
                 self.state_verify_target()
             elif self.state == "RETURN_ROUTE":
@@ -853,6 +873,7 @@ class Task2FSM:
 
     def state_idle(self):
         self.set_vision(False)
+        self.laser_off()
         self.stop_motion()
 
         if self.scan_target_requested:
@@ -994,15 +1015,37 @@ class Task2FSM:
         if self.qr_aligned():
             self.maybe_lock_aligned_xyz_keep_mission_yaw()
             self.stop_motion()
-            self.set_state("VERIFY_TARGET")
+            self.set_state("LASER_FLASH")
             return
         if self.state_elapsed() > self.align_timeout:
+            # ====================【修改 2026-05-04】对齐失败仍点亮激光并继续验证 ====================
+            # 能进入 ALIGN_QR，说明已经读到了二维码编号。
+            # 对齐超时只代表激光点没有完全压到二维码中心，不代表目标二维码识别失败。
+            # 所以这里不再直接 FAIL，而是先点亮激光，再进入 VERIFY_TARGET 判断编号是否匹配。
+            rospy.logwarn(
+                "TASK2 align timeout, but QR id=%d has been detected. Flash laser and continue VERIFY_TARGET.",
+                int(self.qr["id"])
+            )
             self.stop_motion()
-            self.publish_target_result("FAIL")
-            self.route_index = 0
-            self.set_state("RETURN_ROUTE")
+            self.set_state("LASER_FLASH")
             return
+            # ===========================================================================
         self.visual_align()
+
+    def state_laser_flash(self):
+        """LASER_FLASH：任务2识别到目标点二维码后点亮激光，然后进入编号验证。"""
+        self.set_vision(True)
+        self.hold_scan_position()
+
+        if not self.laser_started:
+            self.laser_started = True
+            self.laser_on()
+            self.state_enter_time = rospy.Time.now()
+            return
+
+        if self.state_elapsed() >= self.laser_flash_time:
+            self.laser_off()
+            self.set_state("VERIFY_TARGET")
 
     def state_verify_target(self):
         self.set_vision(True)
@@ -1046,6 +1089,7 @@ class Task2FSM:
 
     def state_land(self):
         self.set_vision(False)
+        self.laser_off()
         self.stop_motion()
         now = rospy.Time.now()
         if (not self.land_requested) or (now - self.land_request_last_pub > rospy.Duration(1.0)):
@@ -1063,11 +1107,13 @@ class Task2FSM:
     def state_finish(self):
         self.scan_hold_target = None
         self.set_vision(False)
+        self.laser_off()
         self.stop_motion()
 
     def state_emergency_stop(self):
         self.scan_hold_target = None
         self.set_vision(False)
+        self.laser_off()
         self.stop_motion()
         self.publish_stop_to_bridge()
 
