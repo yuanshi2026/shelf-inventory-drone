@@ -93,6 +93,32 @@ class Task2FSM:
         self.settle_yaw_rate_eps = float(self.routes.get("settle_yaw_rate_eps", 0.12))
         self.target_scan_timeout = float(self.routes.get("target_scan_timeout", 8.0))
 
+        # ====================【锁点悬停 2026-05-04】任务2扫描阶段锁定任务坐标系目标 ====================
+        # 说明：
+        #   目标货物扫描点到达后，不再只发 0 速度，而是持续锁定 target_scan 的 x/y/z/yaw。
+        #   target_scan 来自 task2_routes.yaml 中 scan_points 的相对坐标，经 resolve_point() 转成 local 坐标。
+        #   因此锁定的是任务坐标系目标，不是某一瞬间的实际飞机姿态，避免把偏掉的 yaw 固化下来。
+        self.scan_hold_kp_xy = float(self.routes.get("scan_hold_kp_xy", 0.35))
+        self.scan_hold_kp_z = float(self.routes.get("scan_hold_kp_z", 0.45))
+        self.scan_hold_kp_yaw = float(self.routes.get("scan_hold_kp_yaw", 0.80))
+
+        self.scan_hold_max_vel_xy = float(self.routes.get("scan_hold_max_vel_xy", 0.08))
+        self.scan_hold_max_vel_z = float(self.routes.get("scan_hold_max_vel_z", 0.06))
+        self.scan_hold_max_yaw_rate = float(self.routes.get("scan_hold_max_yaw_rate", 0.30))
+
+        self.scan_hold_deadband_xy = float(self.routes.get("scan_hold_deadband_xy", 0.025))
+        self.scan_hold_deadband_z = float(self.routes.get("scan_hold_deadband_z", 0.025))
+        self.scan_hold_deadband_yaw = math.radians(
+            float(self.routes.get("scan_hold_deadband_yaw_deg", 2.0))
+        )
+
+        # 默认 mission：识别/验证阶段始终锁 YAML 任务点；
+        # 可选 aligned_xyz：二维码对准后锁当前 x/y/z，但 yaw 仍锁 YAML 任务航向。
+        self.scan_lock_after_align_mode = str(
+            self.routes.get("scan_lock_after_align_mode", "mission")
+        )
+        # ============================================================================
+
         # 进扫码点前的安全通道 y 坐标。
         # 任务2目标可能是 A1~D6 任意一个点，上下排 z 不一样，
         # 所以不能只靠 YAML 的 routes_to_face 写死最后一个 safe 点。
@@ -168,6 +194,7 @@ class Task2FSM:
         self.target_face = ""
         self.target_slot = 0
         self.target_scan = None
+        self.scan_hold_target = None  # 扫描阶段锁定的任务坐标系 x/y/z/yaw 目标
         self.target_route_to_face = []
         self.target_route_from_face = []
         self.route_index = 0
@@ -242,6 +269,11 @@ class Task2FSM:
         # 进入新的移动目标时重置到点稳定计时。
         if new_state in ["TAKEOFF", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT", "RETURN_ROUTE"]:
             self.arrive_hold_start = None
+
+        # 离开目标扫描相关状态后，清除锁点目标，避免返航/降落阶段误用旧扫描点。
+        if new_state in ["IDLE", "LOAD_TARGET", "TAKEOFF", "GOTO_ROUTE_TO_FACE", "GOTO_SCAN_POINT",
+                         "RETURN_ROUTE", "LAND", "FINISH", "EMERGENCY_STOP"]:
+            self.scan_hold_target = None
 
     def state_elapsed(self):
         return (rospy.Time.now() - self.state_enter_time).to_sec()
@@ -348,6 +380,8 @@ class Task2FSM:
         self.target_coord = ""
         self.target_face = ""
         self.target_slot = 0
+        self.target_scan = None
+        self.scan_hold_target = None
         self.result_sent = False
         self.land_requested = False
         self.land_status = "IDLE"
@@ -501,6 +535,89 @@ class Task2FSM:
             abs(self.yaw_rate) < self.settle_yaw_rate_eps
         )
 
+    def compute_scan_hold_cmd(self, target):
+        """根据任务坐标系锁定目标，计算扫描阶段 x/y/z/yaw 纠偏速度。"""
+        cmd = Twist()
+
+        if target is None:  # 没有锁定目标时，不输出纠偏速度
+            return cmd
+
+        ex = float(target["x"]) - self.x
+        ey = float(target["y"]) - self.y
+        ez = float(target["z"]) - self.z
+        eyaw = normalize_angle(float(target["yaw"]) - self.yaw)
+
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
+        if horizontal_error > self.scan_hold_deadband_xy:  # 水平偏离超过死区时，拉回任务点
+            xy_speed = min(
+                self.scan_hold_max_vel_xy,
+                self.scan_hold_kp_xy * horizontal_error
+            )
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        if abs(ez) > self.scan_hold_deadband_z:  # 高度偏离超过死区时，拉回任务高度
+            cmd.linear.z = clamp(
+                self.scan_hold_kp_z * ez,
+                -self.scan_hold_max_vel_z,
+                self.scan_hold_max_vel_z
+            )
+
+        if abs(eyaw) > self.scan_hold_deadband_yaw:  # yaw 偏离超过死区时，拉回任务航向
+            cmd.angular.z = clamp(
+                self.scan_hold_kp_yaw * eyaw,
+                -self.scan_hold_max_yaw_rate,
+                self.scan_hold_max_yaw_rate
+            )
+
+        return cmd
+
+    def limit_scan_cmd(self, cmd, max_xy=None, max_z=None, max_yaw=None):
+        """限制扫描阶段纠偏速度，避免锁点和视觉微调叠加后过猛。"""
+        if max_xy is None:
+            max_xy = self.scan_hold_max_vel_xy
+        if max_z is None:
+            max_z = self.scan_hold_max_vel_z
+        if max_yaw is None:
+            max_yaw = self.scan_hold_max_yaw_rate
+
+        xy_speed = math.sqrt(cmd.linear.x * cmd.linear.x + cmd.linear.y * cmd.linear.y)
+        if xy_speed > max_xy and xy_speed > 1e-6:  # 水平合速度超限时等比例缩小
+            scale = max_xy / xy_speed
+            cmd.linear.x *= scale
+            cmd.linear.y *= scale
+
+        cmd.linear.z = clamp(cmd.linear.z, -max_z, max_z)
+        cmd.angular.z = clamp(cmd.angular.z, -max_yaw, max_yaw)
+        return cmd
+
+    def hold_scan_position(self):
+        """目标扫描、识别、验证期间持续锁定任务坐标系 x/y/z/yaw。"""
+        if self.scan_hold_target is None:  # 没有扫描锁点时退化为平滑刹车
+            self.brake_motion()
+            return
+
+        cmd = self.compute_scan_hold_cmd(self.scan_hold_target)
+        cmd = self.limit_scan_cmd(cmd)
+        self.publish_smooth_cmd(cmd)
+
+    def maybe_lock_aligned_xyz_keep_mission_yaw(self):
+        """可选：二维码对准成功后锁当前 x/y/z，但 yaw 仍保持 YAML 任务航向。"""
+        if self.scan_hold_target is None:
+            return
+        if self.scan_lock_after_align_mode != "aligned_xyz":
+            return
+
+        mission_yaw = float(self.scan_hold_target["yaw"])
+        self.scan_hold_target = {
+            "type": "hold",
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "yaw": mission_yaw
+        }
+
     def reached_and_hold(self, target):
         if not self.arrived_target(target):
             self.arrive_hold_start = None
@@ -534,15 +651,36 @@ class Task2FSM:
         return abs(err_u) < self.align_pixel_eps and abs(err_v) < self.align_pixel_eps
 
     def visual_align(self):
+        """根据二维码像素误差微调，同时继续锁定任务 yaw，避免目标扫描时原地偏航。"""
         err_u = self.qr["u"] - self.laser_u
         err_v = self.qr["v"] - self.laser_v
+
         vy_body = clamp(-self.align_kp_u * err_u, -self.max_align_vel_y, self.max_align_vel_y)
         vz = clamp(-self.align_kp_v * err_v, -self.max_align_vel_z, self.max_align_vel_z)
-        self.publish_body_velocity(0.0, vy_body, vz, 0.0)
+
+        # 基础锁点命令负责把 x/y/z/yaw 拉回 task2_routes.yaml 中的目标扫码点。
+        # 这样视觉对准阶段即使二维码像素有抖动，也不会放任机体原地偏航。
+        cmd = self.compute_scan_hold_cmd(self.scan_hold_target)
+
+        # 视觉对准允许在机体系横向和高度方向做小幅修正。
+        # 如果希望完全固定 YAML 的 x/y/z/yaw，可以把 align_kp_u/align_kp_v 设为 0。
+        c = math.cos(self.yaw)
+        s = math.sin(self.yaw)
+        cmd.linear.x += -s * vy_body
+        cmd.linear.y += c * vy_body
+        cmd.linear.z += vz
+
+        cmd = self.limit_scan_cmd(
+            cmd,
+            max_xy=max(self.scan_hold_max_vel_xy, self.max_align_vel_y),
+            max_z=max(self.scan_hold_max_vel_z, self.max_align_vel_z),
+            max_yaw=self.scan_hold_max_yaw_rate
+        )
+        self.publish_smooth_cmd(cmd)
 
     def small_search_motion(self):
-        # 与任务1看齐：任务2不再在货架前左右/上下搜索，只原地刹车等待二维码。
-        self.brake_motion()
+        # 与任务1看齐：任务2不再在货架前左右/上下搜索，只锁定目标扫码点等待二维码。
+        self.hold_scan_position()
 
     def publish_stop_to_bridge(self, force=False):
         now = rospy.Time.now()
@@ -558,6 +696,7 @@ class Task2FSM:
         self.stop_requested = True
         self.start_requested = False
         self.scan_target_requested = False
+        self.scan_hold_target = None
         self.set_vision(False)
         self.stop_motion()
         self.set_state("EMERGENCY_STOP")
@@ -611,6 +750,7 @@ class Task2FSM:
         # 目标二维码的真实扫描点。
         scan_raw = self.scan_points[coord]
         self.target_scan = self.resolve_point(scan_raw)
+        self.scan_hold_target = None
 
         # 动态生成进扫码点前的 safe 点。
         # 该点与 target_scan 只有 y 不同，用于保证 safe -> scan 只做 y 方向移动。
@@ -797,6 +937,9 @@ class Task2FSM:
     def state_goto_scan_point(self):
         if self.reached_and_hold(self.target_scan):
             self.stop_motion()
+            # 这里锁的是 task2_routes.yaml 中目标扫码点转换后的任务坐标，
+            # 不是当前飞机实际位姿，避免把还没停稳或已经偏航的姿态保存下来。
+            self.scan_hold_target = deepcopy(self.target_scan)
             self.set_state("HOVER_BEFORE_SCAN")
             return
         if self.arrive_hold_start is None:
@@ -804,7 +947,7 @@ class Task2FSM:
 
     def state_hover_before_scan(self):
         self.set_vision(False)
-        self.brake_motion()
+        self.hold_scan_position()  # 扫码前停稳阶段持续锁定目标 x/y/z/yaw
         elapsed = self.state_elapsed()
 
         if elapsed < self.scan_pre_hover_time:
@@ -827,7 +970,7 @@ class Task2FSM:
 
     def state_search_qr(self):
         self.set_vision(True)
-        self.brake_motion()
+        self.hold_scan_position()  # 搜索二维码时不再只发 0 速度，而是锁定目标点
 
         if self.fresh_qr_found():
             self.stop_motion()
@@ -849,6 +992,7 @@ class Task2FSM:
             self.set_state("SEARCH_QR")
             return
         if self.qr_aligned():
+            self.maybe_lock_aligned_xyz_keep_mission_yaw()
             self.stop_motion()
             self.set_state("VERIFY_TARGET")
             return
@@ -862,7 +1006,7 @@ class Task2FSM:
 
     def state_verify_target(self):
         self.set_vision(True)
-        self.stop_motion()
+        self.hold_scan_position()  # 验证目标编号期间继续锁定目标 x/y/z/yaw
         if self.fresh_qr_found():
             if int(self.qr["id"]) == int(self.target_id):
                 self.publish_target_result("OK")
@@ -878,6 +1022,7 @@ class Task2FSM:
 
     def state_return_route(self):
         self.set_vision(False)
+        self.scan_hold_target = None
 
         if not self.target_route_from_face:
             self.target_route_from_face = [self.resolve_point(self.land_point)]
@@ -916,10 +1061,12 @@ class Task2FSM:
             rospy.logwarn_throttle(1.0, "TASK2 LAND timeout, current land_status=%s", self.land_status)
 
     def state_finish(self):
+        self.scan_hold_target = None
         self.set_vision(False)
         self.stop_motion()
 
     def state_emergency_stop(self):
+        self.scan_hold_target = None
         self.set_vision(False)
         self.stop_motion()
         self.publish_stop_to_bridge()
