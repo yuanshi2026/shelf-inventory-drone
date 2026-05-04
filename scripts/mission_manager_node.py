@@ -80,6 +80,7 @@ class MissionManager:
         rospy.Subscriber("/task2/cmd_vel", Twist, self.task2_cmd_callback, queue_size=20)
 
         # Vision enable requests from FSMs. Only the active task can reach /vision/enable.
+        # Exception: task2 pre-scan (CMD:TASK2_SCAN_TARGET) runs while mode is IDLE.
         rospy.Subscriber("/task1/vision_enable", Bool, self.task1_vision_callback, queue_size=10)
         rospy.Subscriber("/task2/vision_enable", Bool, self.task2_vision_callback, queue_size=10)
 
@@ -230,6 +231,12 @@ class MissionManager:
     def task2_vision_callback(self, msg):
         self.task2_vision_enable = bool(msg.data)
 
+        # 任务2.1（CMD:TASK2_SCAN_TARGET）是起飞前原地扫码，
+        # 这一步不会把 mission mode 切到 TASK2，而是保持 IDLE。
+        # 因此 IDLE 下允许 task2_fsm_node 临时打开视觉，否则 /vision/enable 会一直被仲裁为 False。
+        if self.mode == "IDLE" or self.mode == "TASK2":
+            self.publish_vision_enable(self.get_active_vision_enable())
+
     def fsm1_state_callback(self, msg):
         state = msg.data.strip()
 
@@ -287,7 +294,12 @@ class MissionManager:
         if self.mode == "TASK2":
             return self.task2_vision_enable
 
-        # IDLE / EMERGENCY: vision must be disabled.
+        if self.mode == "IDLE":
+            # 特例：任务2.1 是起飞前原地扫码，mode 仍是 IDLE，
+            # 但必须允许 /task2/vision_enable=True 打开 qr_vision_node。
+            return self.task2_vision_enable
+
+        # EMERGENCY: vision must be disabled.
         return False
 
     def run(self):
