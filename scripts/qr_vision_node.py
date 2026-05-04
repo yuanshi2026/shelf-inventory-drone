@@ -4,6 +4,7 @@
 import re
 import json
 import time
+import os
 
 import cv2
 import numpy as np
@@ -33,6 +34,11 @@ class QRVisionNode:
 
         self.show_debug = bool(rospy.get_param("~show_debug", False))
 
+        # 使能瞬间拍照保存：测试视觉是否正常启动、画面里二维码长什么样
+        self.save_enable_snapshot = bool(rospy.get_param("~save_enable_snapshot", True))
+        default_snapshot_dir = os.path.join(os.path.expanduser("~"), "qr_vision_snapshots")
+        self.snapshot_dir = rospy.get_param("~snapshot_dir", default_snapshot_dir)
+
         # 二维码有效编号范围
         self.min_id = int(rospy.get_param("~min_id", 1))
         self.max_id = int(rospy.get_param("~max_id", 24))
@@ -41,10 +47,16 @@ class QRVisionNode:
         self.frame_count = 0
         self.fail_count = 0
 
+        # 只在视觉从关闭 -> 开启时保存一张，不会每帧狂存
+        self.pending_enable_snapshot = False
+        self.snapshot_count = 0
+
         self.last_publish_time = rospy.Time(0)
         self.last_disabled_publish_time = rospy.Time(0)
 
         self.detector = cv2.QRCodeDetector()
+
+        self.init_snapshot_dir()
 
         self.result_pub = rospy.Publisher(
             self.qr_result_topic,
@@ -83,6 +95,8 @@ class QRVisionNode:
         rospy.loginfo("qr_vision_node started.")
         rospy.loginfo("Subscribe: %s", self.enable_topic)
         rospy.loginfo("Publish:   %s", self.qr_result_topic)
+        if self.save_enable_snapshot:
+            rospy.loginfo("Enable snapshots will be saved to: %s", self.snapshot_dir)
 
     def configure_camera(self):
         """简单设置相机参数。失败不影响运行。"""
@@ -105,8 +119,60 @@ class QRVisionNode:
             rospy.logwarn("Camera option setup failed, ignored: %s", str(e))
 
     def enable_callback(self, msg):
-        """FSM 控制视觉是否工作。"""
-        self.vision_enabled = bool(msg.data)
+        """FSM 控制视觉是否工作。
+
+        当 /vision/enable 从 False 变 True 时，只标记一次拍照请求。
+        真正保存照片放在主循环拿到 RealSense 当前帧之后执行，避免回调里阻塞。
+        """
+        new_state = bool(msg.data)
+
+        if new_state and not self.vision_enabled:
+            self.pending_enable_snapshot = True
+            rospy.loginfo("Vision enabled, snapshot will be saved on next camera frame.")
+
+        self.vision_enabled = new_state
+
+    def init_snapshot_dir(self):
+        """初始化使能拍照保存目录，并按已有图片数量继续编号。"""
+        if not self.save_enable_snapshot:
+            return
+
+        try:
+            if not os.path.exists(self.snapshot_dir):
+                os.makedirs(self.snapshot_dir)
+
+            max_index = 0
+            for name in os.listdir(self.snapshot_dir):
+                if not name.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
+                base = os.path.splitext(name)[0]
+                if base.isdigit():
+                    max_index = max(max_index, int(base))
+
+            self.snapshot_count = max_index
+
+        except Exception as e:
+            self.save_enable_snapshot = False
+            rospy.logwarn("Snapshot directory init failed, snapshot disabled: %s", str(e))
+
+    def save_current_frame_snapshot(self, frame):
+        """保存当前画面。文件名按 1.jpg、2.jpg ... 顺序递增。"""
+        if not self.save_enable_snapshot:
+            return
+
+        try:
+            self.snapshot_count += 1
+            filename = "{}.jpg".format(self.snapshot_count)
+            path = os.path.join(self.snapshot_dir, filename)
+
+            ok = cv2.imwrite(path, frame)
+            if ok:
+                rospy.loginfo("Enable snapshot saved: %s", path)
+            else:
+                rospy.logwarn("Enable snapshot save failed: %s", path)
+
+        except Exception as e:
+            rospy.logwarn("Enable snapshot save exception: %s", str(e))
 
     def make_result(self, found=False, qr_id=-1, u=-1.0, v=-1.0, area=0.0):
         """生成发给 FSM 的 JSON 字符串。"""
@@ -408,6 +474,12 @@ class QRVisionNode:
                     continue
 
                 frame = np.asanyarray(color_frame.get_data())
+
+                # 如果刚收到视觉使能，上来就保存当前画面。
+                # 注意：这是原始相机画面，不依赖二维码是否识别成功。
+                if self.vision_enabled and self.pending_enable_snapshot:
+                    self.save_current_frame_snapshot(frame)
+                    self.pending_enable_snapshot = False
 
                 now = rospy.Time.now()
 
