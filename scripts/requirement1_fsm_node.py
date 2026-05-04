@@ -80,6 +80,21 @@ class Requirement1FSM:
             float(self.mission.get("arrive_yaw_eps_deg", 10.0))
         ) # 偏航角到达阈值，转成弧度
 
+        # ====================【修改 2026-05-04】扫码点使用更严格到达阈值 ====================
+        # 作用：
+        #   B5/B2 这类直线中间扫码点如果仍用 0.15m 到达圈，容易刚进圈就带速度进入扫码。
+        #   safe 过渡点继续用 arrive_pos_eps，scan 点单独用 scan_arrive_*。
+        self.scan_arrive_pos_eps = float(
+            self.mission.get("scan_arrive_pos_eps", 0.06)
+        )
+        self.scan_arrive_z_eps = float(
+            self.mission.get("scan_arrive_z_eps", 0.06)
+        )
+        self.scan_arrive_yaw_eps = math.radians(
+            float(self.mission.get("scan_arrive_yaw_eps_deg", 6.0))
+        )
+        # =================================================================================
+
         self.kp_xy = float(self.mission.get("kp_xy", 0.45))   # 水平 P 控制系数
         self.kp_z = float(self.mission.get("kp_z", 0.45))     # 高度 P 控制系数
         self.kp_yaw = float(self.mission.get("kp_yaw", 0.60)) # 偏航 P 控制系数
@@ -101,6 +116,16 @@ class Requirement1FSM:
         self.max_acc_z = float(self.mission.get("max_acc_z", 0.12))         # 竖直方向最大速度变化率，单位 m/s^2
         self.max_acc_yaw = float(self.mission.get("max_acc_yaw", 0.35))     # 偏航角速度最大变化率，单位 rad/s^2
 
+        # ====================【微调 2026-05-04】起飞专用竖直速度 ====================
+        # 起飞阶段可以略快一点，但不影响后续扫二维码时的高度控制参数。
+        self.takeoff_max_vel_z = float(
+            self.mission.get("takeoff_max_vel_z", self.max_vel_z)
+        ) # 起飞阶段最大竖直速度，单位 m/s
+        self.takeoff_max_acc_z = float(
+            self.mission.get("takeoff_max_acc_z", self.max_acc_z)
+        ) # 起飞阶段竖直加速度限幅，单位 m/s^2
+        # =======================================================================
+
         self.min_slow_distance_xy = float(
             self.mission.get("min_slow_distance_xy", 0.20)
         ) # 水平距离小于该值附近时明显减速，避免到点冲过
@@ -113,26 +138,6 @@ class Requirement1FSM:
             float(self.mission.get("yaw_first_threshold_deg", 18.0))
         ) # 偏航误差大于该角度时，优先原地转向，减少边转边飘
 
-        # ====================【修改 2026-05-04】平移/旋转分离控制参数 ====================
-        # 目标：
-        #   1. 平移段：主要移动 x/y/z，航向角只做小幅保持，不允许一边大幅旋转一边平移。
-        #   2. 旋转段：目标 x/y/z 基本已到位时，原地转 yaw，同时用小速度锁住 x/y/z 防止漂移。
-        # 这样即使 YAML 里某个点不小心同时改了位置和 yaw，控制器也会自动先平移、后原地旋转。
-        self.motion_split_enable = bool(self.mission.get("motion_split_enable", True))
-        self.translate_yaw_hold_threshold = math.radians(
-            float(self.mission.get("translate_yaw_hold_threshold_deg", 25.0))
-        )
-        self.translate_yaw_hold_max_rate = float(
-            self.mission.get("translate_yaw_hold_max_rate", 0.16)
-        )
-        self.rotate_lock_kp_xy = float(self.mission.get("rotate_lock_kp_xy", 0.30))
-        self.rotate_lock_kp_z = float(self.mission.get("rotate_lock_kp_z", 0.40))
-        self.rotate_lock_max_vel_xy = float(self.mission.get("rotate_lock_max_vel_xy", 0.06))
-        self.rotate_lock_max_vel_z = float(self.mission.get("rotate_lock_max_vel_z", 0.04))
-        self.rotate_lock_deadband_xy = float(self.mission.get("rotate_lock_deadband_xy", 0.025))
-        self.rotate_lock_deadband_z = float(self.mission.get("rotate_lock_deadband_z", 0.025))
-        # ================================================================================
-
         self.arrive_hold_time = float(
             self.mission.get("arrive_hold_time", 0.40)
         ) # 到达航点后稳定等待时间，单位 s
@@ -142,7 +147,7 @@ class Requirement1FSM:
         self.last_control_time = rospy.Time.now() # 上一次速度规划更新时间
         # =================================================================================
 
-        self.laser_u = float(self.mission.get("laser_u", 320.0)) # 激光点图像横坐标
+        self.laser_u = float(self.mission.get("laser_u", 424.0)) # 激光点图像横坐标
         self.laser_v = float(self.mission.get("laser_v", 240.0)) # 激光点图像纵坐标
         self.align_pixel_eps = float(self.mission.get("align_pixel_eps", 25.0)) # 对准像素阈值
 
@@ -171,11 +176,11 @@ class Requirement1FSM:
         #   先进入 HOVER_BEFORE_SCAN 状态，纯零速度悬停刹车一段时间。
         #   这样能避免“刚冲进到达误差圈，机体还有残余速度就开始扫码”造成摇摆。
         self.scan_pre_hover_time = float(
-            self.mission.get("scan_pre_hover_time", 2.0)
-        ) # 扫码前最短纯悬停时间，单位 s
+            self.mission.get("scan_pre_hover_time", 0.5)
+        ) # 扫码前最短锁点悬停时间，单位 s
 
         self.scan_pre_hover_timeout = float(
-            self.mission.get("scan_pre_hover_timeout", 3.0)
+            self.mission.get("scan_pre_hover_timeout", 2.0)
         ) # 速度噪声导致无法满足停稳条件时，最多等待时间，单位 s
 
         self.settle_vel_xy_eps = float(
@@ -600,17 +605,12 @@ class Requirement1FSM:
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
 
-        # ====================【修改 2026-05-04】根据 FSM 状态控制视觉节点 ====================
-        # 关键修正：HOVER_BEFORE_SCAN 也打开视觉。
-        # 原因：qr_vision_node 只有收到 /vision/enable=True 后才开始取图/保存使能快照；
-        # 如果停稳阶段一直发 False，实飞时队友会看到相机没有拍照。
-        # 注意：HOVER_BEFORE_SCAN 阶段虽然打开视觉，但 FSM 不使用二维码结果；
-        # 进入 SEARCH_QR 前仍会清空旧 qr，避免提前识别结果误触发。
-        if new_state in ["HOVER_BEFORE_SCAN", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
+        # ====================【新增】根据 FSM 状态控制视觉节点 ====================
+        if new_state in ["SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "SEND_RESULT"]:
             self.set_vision(True)
         else:
             self.set_vision(False)
-        # =================================================================================
+        # ===============================================================
 
         # ====================【实飞稳定修改 2026-05-03】进入新目标状态时重置到点稳定计时 ====================
         if new_state in ["TAKEOFF", "GOTO_MISSION_POINT", "RETURN_LAND"]:
@@ -803,33 +803,13 @@ class Requirement1FSM:
         """生成降落点上方目标点。"""
         return self.resolve_point(self.land_point)
 
-    def compute_position_lock_cmd(self, target, max_xy, max_z):
-        """在原地旋转时轻微锁住 x/y/z，避免只转 yaw 时水平位置被气流或惯性带偏。"""
+    def goto_target(self, target, max_vel_z=None, max_acc_z=None):
+        """使用“距离限速 + 限加速度”的方式飞向目标点。
 
-        cmd = Twist()
-
-        ex = target["x"] - self.x
-        ey = target["y"] - self.y
-        ez = target["z"] - self.z
-        horizontal_error = math.sqrt(ex * ex + ey * ey)
-
-        if horizontal_error > self.rotate_lock_deadband_xy:
-            xy_speed = min(max_xy, self.rotate_lock_kp_xy * horizontal_error)
-            cmd.linear.x = xy_speed * ex / horizontal_error
-            cmd.linear.y = xy_speed * ey / horizontal_error
-
-        if abs(ez) > self.rotate_lock_deadband_z:
-            cmd.linear.z = clamp(self.rotate_lock_kp_z * ez, -max_z, max_z)
-
-        return cmd
-
-    def goto_target(self, target):
-        """飞向目标点，并强制把“平移”和“大角度旋转”拆开。
-
-        设计目的：
-            - 平移段：x/y/z 正常移动，yaw 只在误差较小时做小幅保持；
-              若目标点同时要求大角度转向，则先忽略这个大 yaw，等位置到位后再转。
-            - 旋转段：当 x/y/z 已经到位而 yaw 未到位时，原地转向，同时小速度锁住 x/y/z。
+        与旧 P 控制的区别：
+            旧逻辑直接 cmd = kp * error，误差大时速度突然打满；
+            新逻辑先根据剩余距离规划目标速度，再用 publish_smooth_cmd() 限制速度变化率，
+            因此起步、刹车、切航点都会更平滑。
         """
 
         ex = target["x"] - self.x
@@ -838,33 +818,36 @@ class Requirement1FSM:
         eyaw = normalize_angle(target["yaw"] - self.yaw)
 
         horizontal_error = math.sqrt(ex * ex + ey * ey)
-        position_not_ready = (
-            horizontal_error >= self.arrive_pos_eps or
-            abs(ez) >= self.arrive_z_eps
-        )
-
-        # ====================【修改 2026-05-04】旋转段：锁 x/y/z，只转 yaw ====================
-        if self.motion_split_enable and (not position_not_ready) and abs(eyaw) > self.arrive_yaw_eps:
-            cmd = self.compute_position_lock_cmd(
-                target,
-                self.rotate_lock_max_vel_xy,
-                self.rotate_lock_max_vel_z
-            )
-            yaw_speed = self.distance_limited_speed(
-                abs(eyaw),
-                self.max_yaw_rate,
-                self.max_acc_yaw,
-                math.radians(8.0)
-            )
-            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
-            self.publish_smooth_cmd(cmd)
-            return
-        # =================================================================================
 
         cmd = Twist()
 
-        # 平移段：只根据位置误差生成 x/y/z 速度。
-        if horizontal_error > 1e-4:
+        # 起飞阶段可传入略大的竖直速度/加速度；其他阶段默认使用全局稳定参数。
+        if max_vel_z is None:
+            max_vel_z = self.max_vel_z
+        if max_acc_z is None:
+            max_acc_z = self.max_acc_z
+
+        yaw_speed = self.distance_limited_speed(
+            abs(eyaw),
+            self.max_yaw_rate,
+            self.max_acc_yaw,
+            math.radians(8.0)
+        )
+        cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
+
+        # 偏航误差较大时先转向，水平速度置零，避免无人机边转边斜着飘。
+        if abs(eyaw) > self.yaw_first_threshold:
+            z_speed = self.distance_limited_speed(
+                abs(ez),
+                max_vel_z,
+                max_acc_z,
+                self.min_slow_distance_z
+            )
+            cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+            self.publish_smooth_cmd(cmd)
+            return
+
+        if horizontal_error > 1e-4:  # 有水平误差时，沿误差方向生成速度向量
             xy_speed = self.distance_limited_speed(
                 horizontal_error,
                 self.max_vel_xy,
@@ -876,38 +859,27 @@ class Requirement1FSM:
 
         z_speed = self.distance_limited_speed(
             abs(ez),
-            self.max_vel_z,
-            self.max_acc_z,
+            max_vel_z,
+            max_acc_z,
             self.min_slow_distance_z
         )
         cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
 
-        # ====================【修改 2026-05-04】平移段：航向只小幅保持 ====================
-        if self.motion_split_enable:
-            # 如果 yaw 误差很大，说明这个目标点可能同时包含“平移 + 掉头”。
-            # 此时平移阶段不执行大转向，等 x/y/z 到位后由上面的旋转段原地完成掉头。
-            if abs(eyaw) <= self.translate_yaw_hold_threshold:
-                yaw_speed = clamp(
-                    self.kp_yaw * eyaw,
-                    -self.translate_yaw_hold_max_rate,
-                    self.translate_yaw_hold_max_rate
-                )
-                cmd.angular.z = yaw_speed
-            else:
-                cmd.angular.z = 0.0
-        else:
-            yaw_speed = self.distance_limited_speed(
-                abs(eyaw),
-                self.max_yaw_rate,
-                self.max_acc_yaw,
-                math.radians(8.0)
-            )
-            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
-
         self.publish_smooth_cmd(cmd)
 
-    def arrived_target(self, target):
-        """判断是否到达目标点。"""
+    def arrived_target(self, target, pos_eps=None, z_eps=None, yaw_eps=None):
+        """判断是否到达目标点。
+
+        pos_eps / z_eps / yaw_eps 允许扫码点使用更严格阈值，
+        但不改变 GOTO -> HOVER -> SEARCH 的整体状态转换。
+        """
+
+        if pos_eps is None:
+            pos_eps = self.arrive_pos_eps
+        if z_eps is None:
+            z_eps = self.arrive_z_eps
+        if yaw_eps is None:
+            yaw_eps = self.arrive_yaw_eps
 
         ex = target["x"] - self.x
         ey = target["y"] - self.y
@@ -917,9 +889,9 @@ class Requirement1FSM:
         horizontal_error = math.sqrt(ex * ex + ey * ey)
 
         return (
-            horizontal_error < self.arrive_pos_eps and
-            abs(ez) < self.arrive_z_eps and
-            abs(eyaw) < self.arrive_yaw_eps
+            horizontal_error < pos_eps and
+            abs(ez) < z_eps and
+            abs(eyaw) < yaw_eps
         )
 
     def velocity_stable(self):
@@ -1042,21 +1014,24 @@ class Requirement1FSM:
         self.publish_smooth_cmd(cmd)
 
     # ====================【实飞稳定修改 2026-05-03】到点后稳定等待 ====================
-    def reached_and_hold(self, target):
+    def reached_and_hold(self, target, pos_eps=None, z_eps=None, yaw_eps=None, hold_target=False):
         """判断是否到达目标，并在目标附近稳定等待 arrive_hold_time。
 
-        返回 True：
-            已经进入到达阈值，并且稳定等待时间满足要求。
-
-        返回 False：
-            尚未到达，或者刚到达但还没有稳定够 0.4 秒。
+        hold_target=True 时，进入到达阈值后不再只刹车，而是继续小速度锁定目标点。
+        这用于扫码点，避免 B5/B2 这类中间点刚进阈值就带速度进入扫码。
         """
 
-        if not self.arrived_target(target):  # 还没进入到达阈值，继续正常飞行
+        if not self.arrived_target(target, pos_eps, z_eps, yaw_eps):  # 还没进入到达阈值，继续正常飞行
             self.arrive_hold_start = None
             return False
 
-        self.brake_motion()  # 进入到达阈值后先平滑刹车，不立刻切状态
+        if hold_target:
+            # 扫码点进入阈值后继续拉回目标 x/y/z/yaw，而不是只发刹车命令。
+            cmd = self.compute_scan_hold_cmd(target)
+            cmd = self.limit_scan_cmd(cmd)
+            self.publish_smooth_cmd(cmd)
+        else:
+            self.brake_motion()  # safe/起飞/降落点仍保持原来的平滑刹车等待
 
         if self.arrive_hold_start is None:
             self.arrive_hold_start = rospy.Time.now()
@@ -1107,13 +1082,15 @@ class Requirement1FSM:
         # 这样视觉对准阶段即使二维码像素有抖动，也不会放任机体原地偏航。
         cmd = self.compute_scan_hold_cmd(self.scan_hold_target)
 
-        # 视觉对准允许在机体系横向和高度方向做小幅修正。
-        # 如果希望完全固定 YAML 的 x/y/z/yaw，可以把 align_kp_u/align_kp_v 设为 0。
-        c = math.cos(self.yaw)
-        s = math.sin(self.yaw)
-        cmd.linear.x += -s * vy_body
-        cmd.linear.y += c * vy_body
+        # ====================【修改 2026-05-04】视觉对齐禁止改变货架距离 x ====================
+        # 原来使用当前 yaw 把机体系横向速度转换到 map，yaw 只要不是严格 0/pi，
+        # 就会产生少量 x 方向速度，B 面可能被慢慢拉向货架。
+        # 现在按 YAML 任务航向计算横向修正，并只允许视觉修正 map-y 和 z；
+        # map-x 始终由上面的锁点控制负责保持 50cm 扫描距离。
+        mission_yaw = float(self.scan_hold_target["yaw"]) if self.scan_hold_target is not None else self.yaw
+        cmd.linear.y += math.cos(mission_yaw) * vy_body
         cmd.linear.z += vz
+        # =================================================================================
 
         cmd = self.limit_scan_cmd(
             cmd,
@@ -1259,7 +1236,11 @@ class Requirement1FSM:
             return
 
         if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
-            self.goto_target(target)
+            self.goto_target(
+                target,
+                max_vel_z=self.takeoff_max_vel_z,
+                max_acc_z=self.takeoff_max_acc_z
+            )
 
     def state_goto_mission_point(self):
         """GOTO_MISSION_POINT：飞到当前任务点。"""
@@ -1270,15 +1251,25 @@ class Requirement1FSM:
 
         raw_point = self.points[self.current_index]
         target = self.resolve_point(raw_point)
+        point_type = raw_point.get("type", "safe")
 
-        if not self.reached_and_hold(target):  # 未到达或刚到点未稳定够 0.4 秒
-            if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
+        is_scan_point = (point_type == "scan")
+        pos_eps = self.scan_arrive_pos_eps if is_scan_point else self.arrive_pos_eps
+        z_eps = self.scan_arrive_z_eps if is_scan_point else self.arrive_z_eps
+        yaw_eps = self.scan_arrive_yaw_eps if is_scan_point else self.arrive_yaw_eps
+
+        if not self.reached_and_hold(
+            target,
+            pos_eps=pos_eps,
+            z_eps=z_eps,
+            yaw_eps=yaw_eps,
+            hold_target=is_scan_point
+        ):  # 未到达或刚到点未稳定够 arrive_hold_time
+            if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后由 reached_and_hold 继续锁点/刹车等待
                 self.goto_target(target)
             return
 
         self.stop_motion()
-
-        point_type = raw_point.get("type", "safe")
 
         if point_type == "safe":  # 安全点到达后直接进入下一个航点
             self.current_index += 1
@@ -1300,10 +1291,7 @@ class Requirement1FSM:
     def state_hover_before_scan(self):
         """HOVER_BEFORE_SCAN：进入扫码点后先纯悬停，等机体真的停稳再打开视觉。"""
 
-        # ====================【修改 2026-05-04】停稳阶段也打开视觉使能 ====================
-        # 这里打开视觉只是让相机开始取图/保存快照；本状态不判断 fresh_qr_found()。
-        # 进入 SEARCH_QR 前会清空 qr 缓存，所以不会因为提前识别而误触发。
-        self.set_vision(True)
+        self.set_vision(False)   # 停稳阶段不识别，避免视觉结果提前触发对准动作
         self.hold_scan_position() # 持续锁定任务 x/y/z/yaw，而不是只发 0 速度
 
         elapsed = self.state_elapsed()
@@ -1502,9 +1490,7 @@ class Requirement1FSM:
 
     def state_finish(self):
         """FINISH：任务完成。"""
-        # ====================【修改 2026-05-04】不要在 FINISH 中循环发布 /vision/enable=False ====================
-        # 进入 FINISH 时 set_state() 已经发布过一次 False。
-        # 如果这里继续 30Hz 发布 False，后续启动任务2时会把任务2的视觉 True 抢掉，导致相机不拍照。
+        self.set_vision(False)
         self.stop_motion()
         self.laser_off()
 
