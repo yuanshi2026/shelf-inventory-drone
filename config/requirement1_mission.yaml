@@ -61,7 +61,7 @@ mission:
   points:
     # 起飞后进入左货架下方安全通道；第二个 safe 与 A1 只差 y 坐标
     - {type: safe, x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
-    - {type: safe, x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
+    - {type: safe, x: 0.25, y: 0.25, z: 1.40, yaw: 0.0}
 
     # A 面：左货架左侧，距离左货架中心线 x=0.75 约 0.50m
     - {type: scan, face: A, slot: 1, x: 0.25, y: 0.75, z: 1.40, yaw: 0.0}
