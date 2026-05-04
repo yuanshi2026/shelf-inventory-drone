@@ -113,6 +113,26 @@ class Requirement1FSM:
             float(self.mission.get("yaw_first_threshold_deg", 18.0))
         ) # 偏航误差大于该角度时，优先原地转向，减少边转边飘
 
+        # ====================【修改 2026-05-04】平移/旋转分离控制参数 ====================
+        # 目标：
+        #   1. 平移段：主要移动 x/y/z，航向角只做小幅保持，不允许一边大幅旋转一边平移。
+        #   2. 旋转段：目标 x/y/z 基本已到位时，原地转 yaw，同时用小速度锁住 x/y/z 防止漂移。
+        # 这样即使 YAML 里某个点不小心同时改了位置和 yaw，控制器也会自动先平移、后原地旋转。
+        self.motion_split_enable = bool(self.mission.get("motion_split_enable", True))
+        self.translate_yaw_hold_threshold = math.radians(
+            float(self.mission.get("translate_yaw_hold_threshold_deg", 25.0))
+        )
+        self.translate_yaw_hold_max_rate = float(
+            self.mission.get("translate_yaw_hold_max_rate", 0.16)
+        )
+        self.rotate_lock_kp_xy = float(self.mission.get("rotate_lock_kp_xy", 0.30))
+        self.rotate_lock_kp_z = float(self.mission.get("rotate_lock_kp_z", 0.40))
+        self.rotate_lock_max_vel_xy = float(self.mission.get("rotate_lock_max_vel_xy", 0.06))
+        self.rotate_lock_max_vel_z = float(self.mission.get("rotate_lock_max_vel_z", 0.04))
+        self.rotate_lock_deadband_xy = float(self.mission.get("rotate_lock_deadband_xy", 0.025))
+        self.rotate_lock_deadband_z = float(self.mission.get("rotate_lock_deadband_z", 0.025))
+        # ================================================================================
+
         self.arrive_hold_time = float(
             self.mission.get("arrive_hold_time", 0.40)
         ) # 到达航点后稳定等待时间，单位 s
@@ -783,13 +803,33 @@ class Requirement1FSM:
         """生成降落点上方目标点。"""
         return self.resolve_point(self.land_point)
 
-    def goto_target(self, target):
-        """使用“距离限速 + 限加速度”的方式飞向目标点。
+    def compute_position_lock_cmd(self, target, max_xy, max_z):
+        """在原地旋转时轻微锁住 x/y/z，避免只转 yaw 时水平位置被气流或惯性带偏。"""
 
-        与旧 P 控制的区别：
-            旧逻辑直接 cmd = kp * error，误差大时速度突然打满；
-            新逻辑先根据剩余距离规划目标速度，再用 publish_smooth_cmd() 限制速度变化率，
-            因此起步、刹车、切航点都会更平滑。
+        cmd = Twist()
+
+        ex = target["x"] - self.x
+        ey = target["y"] - self.y
+        ez = target["z"] - self.z
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
+        if horizontal_error > self.rotate_lock_deadband_xy:
+            xy_speed = min(max_xy, self.rotate_lock_kp_xy * horizontal_error)
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        if abs(ez) > self.rotate_lock_deadband_z:
+            cmd.linear.z = clamp(self.rotate_lock_kp_z * ez, -max_z, max_z)
+
+        return cmd
+
+    def goto_target(self, target):
+        """飞向目标点，并强制把“平移”和“大角度旋转”拆开。
+
+        设计目的：
+            - 平移段：x/y/z 正常移动，yaw 只在误差较小时做小幅保持；
+              若目标点同时要求大角度转向，则先忽略这个大 yaw，等位置到位后再转。
+            - 旋转段：当 x/y/z 已经到位而 yaw 未到位时，原地转向，同时小速度锁住 x/y/z。
         """
 
         ex = target["x"] - self.x
@@ -798,30 +838,33 @@ class Requirement1FSM:
         eyaw = normalize_angle(target["yaw"] - self.yaw)
 
         horizontal_error = math.sqrt(ex * ex + ey * ey)
+        position_not_ready = (
+            horizontal_error >= self.arrive_pos_eps or
+            abs(ez) >= self.arrive_z_eps
+        )
+
+        # ====================【修改 2026-05-04】旋转段：锁 x/y/z，只转 yaw ====================
+        if self.motion_split_enable and (not position_not_ready) and abs(eyaw) > self.arrive_yaw_eps:
+            cmd = self.compute_position_lock_cmd(
+                target,
+                self.rotate_lock_max_vel_xy,
+                self.rotate_lock_max_vel_z
+            )
+            yaw_speed = self.distance_limited_speed(
+                abs(eyaw),
+                self.max_yaw_rate,
+                self.max_acc_yaw,
+                math.radians(8.0)
+            )
+            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
+            self.publish_smooth_cmd(cmd)
+            return
+        # =================================================================================
 
         cmd = Twist()
 
-        yaw_speed = self.distance_limited_speed(
-            abs(eyaw),
-            self.max_yaw_rate,
-            self.max_acc_yaw,
-            math.radians(8.0)
-        )
-        cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
-
-        # 偏航误差较大时先转向，水平速度置零，避免无人机边转边斜着飘。
-        if abs(eyaw) > self.yaw_first_threshold:
-            z_speed = self.distance_limited_speed(
-                abs(ez),
-                self.max_vel_z,
-                self.max_acc_z,
-                self.min_slow_distance_z
-            )
-            cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
-            self.publish_smooth_cmd(cmd)
-            return
-
-        if horizontal_error > 1e-4:  # 有水平误差时，沿误差方向生成速度向量
+        # 平移段：只根据位置误差生成 x/y/z 速度。
+        if horizontal_error > 1e-4:
             xy_speed = self.distance_limited_speed(
                 horizontal_error,
                 self.max_vel_xy,
@@ -838,6 +881,28 @@ class Requirement1FSM:
             self.min_slow_distance_z
         )
         cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+
+        # ====================【修改 2026-05-04】平移段：航向只小幅保持 ====================
+        if self.motion_split_enable:
+            # 如果 yaw 误差很大，说明这个目标点可能同时包含“平移 + 掉头”。
+            # 此时平移阶段不执行大转向，等 x/y/z 到位后由上面的旋转段原地完成掉头。
+            if abs(eyaw) <= self.translate_yaw_hold_threshold:
+                yaw_speed = clamp(
+                    self.kp_yaw * eyaw,
+                    -self.translate_yaw_hold_max_rate,
+                    self.translate_yaw_hold_max_rate
+                )
+                cmd.angular.z = yaw_speed
+            else:
+                cmd.angular.z = 0.0
+        else:
+            yaw_speed = self.distance_limited_speed(
+                abs(eyaw),
+                self.max_yaw_rate,
+                self.max_acc_yaw,
+                math.radians(8.0)
+            )
+            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
 
         self.publish_smooth_cmd(cmd)
 

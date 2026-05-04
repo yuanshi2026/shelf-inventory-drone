@@ -83,6 +83,24 @@ class Task2FSM:
         self.min_slow_distance_xy = float(self.routes.get("min_slow_distance_xy", 0.20))
         self.min_slow_distance_z = float(self.routes.get("min_slow_distance_z", 0.15))
         self.yaw_first_threshold = math.radians(float(self.routes.get("yaw_first_threshold_deg", 18.0)))
+
+        # ====================【修改 2026-05-04】平移/旋转分离控制参数 ====================
+        # 平移段只移动 x/y/z，航向角只做小幅保持；旋转段锁住 x/y/z 原地转 yaw。
+        self.motion_split_enable = bool(self.routes.get("motion_split_enable", True))
+        self.translate_yaw_hold_threshold = math.radians(
+            float(self.routes.get("translate_yaw_hold_threshold_deg", 25.0))
+        )
+        self.translate_yaw_hold_max_rate = float(
+            self.routes.get("translate_yaw_hold_max_rate", 0.14)
+        )
+        self.rotate_lock_kp_xy = float(self.routes.get("rotate_lock_kp_xy", 0.30))
+        self.rotate_lock_kp_z = float(self.routes.get("rotate_lock_kp_z", 0.40))
+        self.rotate_lock_max_vel_xy = float(self.routes.get("rotate_lock_max_vel_xy", 0.05))
+        self.rotate_lock_max_vel_z = float(self.routes.get("rotate_lock_max_vel_z", 0.04))
+        self.rotate_lock_deadband_xy = float(self.routes.get("rotate_lock_deadband_xy", 0.025))
+        self.rotate_lock_deadband_z = float(self.routes.get("rotate_lock_deadband_z", 0.025))
+        # ================================================================================
+
         self.arrive_hold_time = float(self.routes.get("arrive_hold_time", 0.40))
 
         # 与任务1看齐：到扫码点后先纯悬停停稳，再打开视觉。
@@ -500,29 +518,53 @@ class Task2FSM:
     def make_takeoff_target(self):
         return {"x": self.home_x, "y": self.home_y, "z": self.home_z + self.takeoff_height, "yaw": self.home_yaw}
 
+    def compute_position_lock_cmd(self, target, max_xy, max_z):
+        """在原地旋转时轻微锁住 x/y/z，避免只转 yaw 时水平位置被气流或惯性带偏。"""
+        cmd = Twist()
+        ex = target["x"] - self.x
+        ey = target["y"] - self.y
+        ez = target["z"] - self.z
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
+        if horizontal_error > self.rotate_lock_deadband_xy:
+            xy_speed = min(max_xy, self.rotate_lock_kp_xy * horizontal_error)
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        if abs(ez) > self.rotate_lock_deadband_z:
+            cmd.linear.z = clamp(self.rotate_lock_kp_z * ez, -max_z, max_z)
+
+        return cmd
+
     def goto_target(self, target):
+        """飞向目标点，并强制把“平移”和“大角度旋转”拆开。"""
         ex = target["x"] - self.x
         ey = target["y"] - self.y
         ez = target["z"] - self.z
         eyaw = normalize_angle(target["yaw"] - self.yaw)
         horizontal_error = math.sqrt(ex * ex + ey * ey)
+        position_not_ready = (
+            horizontal_error >= self.arrive_pos_eps or
+            abs(ez) >= self.arrive_z_eps
+        )
+
+        # ====================【修改 2026-05-04】旋转段：锁 x/y/z，只转 yaw ====================
+        if self.motion_split_enable and (not position_not_ready) and abs(eyaw) > self.arrive_yaw_eps:
+            cmd = self.compute_position_lock_cmd(target, self.rotate_lock_max_vel_xy, self.rotate_lock_max_vel_z)
+            yaw_speed = self.distance_limited_speed(
+                abs(eyaw),
+                self.max_yaw_rate,
+                self.max_acc_yaw,
+                math.radians(8.0)
+            )
+            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
+            self.publish_smooth_cmd(cmd)
+            return
+        # =================================================================================
 
         cmd = Twist()
 
-        yaw_speed = self.distance_limited_speed(
-            abs(eyaw),
-            self.max_yaw_rate,
-            self.max_acc_yaw,
-            math.radians(8.0)
-        )
-        cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
-
-        if abs(eyaw) > self.yaw_first_threshold:
-            z_speed = self.distance_limited_speed(abs(ez), self.max_vel_z, self.max_acc_z, self.min_slow_distance_z)
-            cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
-            self.publish_smooth_cmd(cmd)
-            return
-
+        # 平移段：只根据位置误差生成 x/y/z 速度。
         if horizontal_error > 1e-4:
             xy_speed = self.distance_limited_speed(
                 horizontal_error,
@@ -535,6 +577,25 @@ class Task2FSM:
 
         z_speed = self.distance_limited_speed(abs(ez), self.max_vel_z, self.max_acc_z, self.min_slow_distance_z)
         cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
+
+        # 平移段：航向只小幅保持；若目标 yaw 大幅变化，等位置到位后再原地转。
+        if self.motion_split_enable:
+            if abs(eyaw) <= self.translate_yaw_hold_threshold:
+                cmd.angular.z = clamp(
+                    self.kp_yaw * eyaw,
+                    -self.translate_yaw_hold_max_rate,
+                    self.translate_yaw_hold_max_rate
+                )
+            else:
+                cmd.angular.z = 0.0
+        else:
+            yaw_speed = self.distance_limited_speed(
+                abs(eyaw),
+                self.max_yaw_rate,
+                self.max_acc_yaw,
+                math.radians(8.0)
+            )
+            cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
 
         self.publish_smooth_cmd(cmd)
 
