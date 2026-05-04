@@ -167,7 +167,9 @@ class Task2FSM:
 
         self.cmd_pub = rospy.Publisher(self.cmd_vel_topic, Twist, queue_size=20)
         self.state_pub = rospy.Publisher("/fsm2/state", String, queue_size=20)
-        self.vision_enable_pub = rospy.Publisher("/vision/enable", Bool, queue_size=5)
+        # 不再直接发布 /vision/enable，避免任务1/任务2同时抢视觉节点。
+        # 本节点只发布 /task2/vision_enable，由 mission_manager_node 仲裁后再发布 /vision/enable。
+        self.vision_enable_pub = rospy.Publisher("/task2/vision_enable", Bool, queue_size=5)
         self.target_result_pub = rospy.Publisher("/target/result", String, queue_size=10)
         self.target_id_pub = rospy.Publisher("/target/id", String, queue_size=10)
         self.land_pub = rospy.Publisher("/uav/land", Bool, queue_size=5)
@@ -225,6 +227,9 @@ class Task2FSM:
         self.land_requested = False
         self.land_request_last_pub = rospy.Time(0)
         self.land_status = "IDLE"
+
+        # 视觉使能去重：只在 True/False 状态真正变化时发布，避免反复触发 qr_vision_node 的使能拍照。
+        self.last_vision_enable = None
 
         self.loop_rate = rospy.Rate(30)
         rospy.loginfo("task2_fsm_node started. cmd_vel=%s odom=%s", self.cmd_vel_topic, self.odom_topic)
@@ -302,7 +307,19 @@ class Task2FSM:
         return (rospy.Time.now() - self.state_enter_time).to_sec()
 
     def set_vision(self, enabled):
-        self.vision_enable_pub.publish(Bool(data=bool(enabled)))
+        """发布任务2视觉使能请求。
+
+        注意：本节点不再直接控制 /vision/enable，而是发布到 /task2/vision_enable。
+        mission_manager_node 会根据当前任务模式进行仲裁，最终只让当前任务控制视觉节点。
+        同时这里做去重，避免重复 True/False 触发 qr_vision_node 连续保存使能快照。
+        """
+        enabled = bool(enabled)
+
+        if self.last_vision_enable == enabled:
+            return
+
+        self.last_vision_enable = enabled
+        self.vision_enable_pub.publish(Bool(data=enabled))
 
     def laser_on(self):
         """打开激光。"""

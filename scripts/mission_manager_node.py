@@ -36,12 +36,21 @@ class MissionManager:
         self.task1_cmd_time = rospy.Time(0)
         self.task2_cmd_time = rospy.Time(0)
 
+        # Vision enable requests from FSMs. The manager arbitrates them just like cmd_vel.
+        self.task1_vision_enable = False
+        self.task2_vision_enable = False
+        self.last_vision_enable = None
+
         self.mavros_state = State()
         self.mavros_state_ok = False
         self.land_status = "IDLE"
 
         # Final velocity output to mavros_sitl_bridge
         self.cmd_pub = rospy.Publisher("/uav/cmd_vel", Twist, queue_size=20)
+
+        # Final vision enable output to qr_vision_node.
+        # FSM1/FSM2 must not publish /vision/enable directly; they publish task-specific requests.
+        self.vision_enable_pub = rospy.Publisher("/vision/enable", Bool, queue_size=5, latch=True)
 
         # Current mission mode for debugging / FSM reference
         self.mode_pub = rospy.Publisher("/mission/mode", String, queue_size=10, latch=True)
@@ -68,18 +77,35 @@ class MissionManager:
         rospy.Subscriber("/task1/cmd_vel", Twist, self.task1_cmd_callback, queue_size=20)
         rospy.Subscriber("/task2/cmd_vel", Twist, self.task2_cmd_callback, queue_size=20)
 
+        # Vision enable requests from FSMs. Only the active task can reach /vision/enable.
+        rospy.Subscriber("/task1/vision_enable", Bool, self.task1_vision_callback, queue_size=10)
+        rospy.Subscriber("/task2/vision_enable", Bool, self.task2_vision_callback, queue_size=10)
+
         # Task completion states
         rospy.Subscriber("/fsm/state", String, self.fsm1_state_callback, queue_size=20)
         rospy.Subscriber("/fsm2/state", String, self.fsm2_state_callback, queue_size=20)
 
         rospy.loginfo("mission_manager_node_e6 started.")
         self.publish_mode()
+        self.publish_vision_enable(False)
 
     def zero_cmd(self):
         return Twist()
 
     def publish_mode(self):
         self.mode_pub.publish(String(data=self.mode))
+
+    def publish_vision_enable(self, enabled):
+        """Publish /vision/enable only when the final arbitrated value changes.
+
+        This prevents qr_vision_node from seeing repeated False/True edges and saving many
+        enable snapshots at one scan point.
+        """
+        enabled = bool(enabled)
+        if self.last_vision_enable == enabled:
+            return
+        self.last_vision_enable = enabled
+        self.vision_enable_pub.publish(Bool(data=enabled))
 
     def set_mode(self, new_mode):
         if new_mode == self.mode:
@@ -127,6 +153,7 @@ class MissionManager:
 
         rospy.logerr("Emergency stop requested: entering EMERGENCY mode and publishing /uav/stop=True")
         self.cmd_pub.publish(self.zero_cmd())
+        self.publish_vision_enable(False)
         self.set_mode("EMERGENCY")
         self.stop_pub.publish(Bool(data=True))
 
@@ -150,7 +177,10 @@ class MissionManager:
         rospy.logwarn("Mission reset accepted: manager returns to IDLE.")
         self.task1_cmd = self.zero_cmd()
         self.task2_cmd = self.zero_cmd()
+        self.task1_vision_enable = False
+        self.task2_vision_enable = False
         self.cmd_pub.publish(self.zero_cmd())
+        self.publish_vision_enable(False)
         self.set_mode("IDLE")
 
     def task1_cmd_callback(self, msg):
@@ -161,17 +191,25 @@ class MissionManager:
         self.task2_cmd = msg
         self.task2_cmd_time = rospy.Time.now()
 
+    def task1_vision_callback(self, msg):
+        self.task1_vision_enable = bool(msg.data)
+
+    def task2_vision_callback(self, msg):
+        self.task2_vision_enable = bool(msg.data)
+
     def fsm1_state_callback(self, msg):
         state = msg.data.strip()
 
         if self.mode == "TASK1" and state == "FINISH":
             rospy.logwarn("TASK1 finished: manager returns to IDLE.")
             self.cmd_pub.publish(self.zero_cmd())
+            self.publish_vision_enable(False)
             self.set_mode("IDLE")
 
         if self.mode == "TASK1" and state == "EMERGENCY_STOP":
             rospy.logerr("TASK1 reported EMERGENCY_STOP: manager enters EMERGENCY.")
             self.cmd_pub.publish(self.zero_cmd())
+            self.publish_vision_enable(False)
             self.set_mode("EMERGENCY")
 
     def fsm2_state_callback(self, msg):
@@ -180,11 +218,13 @@ class MissionManager:
         if self.mode == "TASK2" and state == "FINISH":
             rospy.logwarn("TASK2 finished: manager returns to IDLE.")
             self.cmd_pub.publish(self.zero_cmd())
+            self.publish_vision_enable(False)
             self.set_mode("IDLE")
 
         if self.mode == "TASK2" and state == "EMERGENCY_STOP":
             rospy.logerr("TASK2 reported EMERGENCY_STOP: manager enters EMERGENCY.")
             self.cmd_pub.publish(self.zero_cmd())
+            self.publish_vision_enable(False)
             self.set_mode("EMERGENCY")
 
     def get_active_cmd(self):
@@ -205,10 +245,21 @@ class MissionManager:
         # IDLE / EMERGENCY: never forward task velocity
         return self.zero_cmd()
 
+    def get_active_vision_enable(self):
+        if self.mode == "TASK1":
+            return self.task1_vision_enable
+
+        if self.mode == "TASK2":
+            return self.task2_vision_enable
+
+        # IDLE / EMERGENCY: vision must be disabled.
+        return False
+
     def run(self):
         rate = rospy.Rate(self.rate_hz)
         while not rospy.is_shutdown():
             self.cmd_pub.publish(self.get_active_cmd())
+            self.publish_vision_enable(self.get_active_vision_enable())
             rate.sleep()
 
 
