@@ -93,6 +93,14 @@ class Task2FSM:
         self.settle_yaw_rate_eps = float(self.routes.get("settle_yaw_rate_eps", 0.12))
         self.target_scan_timeout = float(self.routes.get("target_scan_timeout", 8.0))
 
+        # 进扫码点前的安全通道 y 坐标。
+        # 任务2目标可能是 A1~D6 任意一个点，上下排 z 不一样，
+        # 所以不能只靠 YAML 的 routes_to_face 写死最后一个 safe 点。
+        # build_target_route() 会根据目标扫码点动态生成一个 safe 点：
+        #   x / z / yaw 与目标扫码点一致，y 使用 pre_scan_y。
+        # 这样最后 safe -> scan 只会沿 y 方向移动。
+        self.pre_scan_y = float(self.routes.get("pre_scan_y", -0.10))
+
         # 图像对齐参数：只做横向 + 上下微调，不做前后微调。
         self.laser_u = float(self.routes.get("laser_u", 424.0))
         self.laser_v = float(self.routes.get("laser_v", 240.0))
@@ -567,6 +575,19 @@ class Task2FSM:
             return "", 0
         return face, slot
 
+    def make_pre_scan_safe_point(self, raw_scan_point):
+        """根据目标扫码点动态生成进入扫码前的 safe 点。
+
+        raw_scan_point 来自 task2_routes.yaml 的 scan_points，例如 B5。
+        生成的 safe 点保持 x / z / yaw 不变，只把 y 改成 pre_scan_y。
+        这样无人机跑完 routes_to_face 后，最后一段进入二维码点时只沿 y 方向移动，
+        不会在进入扫描过程中再改变与货架的横向距离，也不会临时调高度。
+        """
+        safe_point = deepcopy(raw_scan_point)
+        safe_point["type"] = "safe"
+        safe_point["y"] = self.pre_scan_y
+        return safe_point
+
     def build_target_route(self):
         self.inventory_map = self.load_inventory_map()
         coord = self.inventory_map.get(str(self.target_id), "")
@@ -586,7 +607,14 @@ class Task2FSM:
         self.target_coord = coord
         self.target_face = face
         self.target_slot = slot
-        self.target_scan = self.resolve_point(self.scan_points[coord])
+
+        # 目标二维码的真实扫描点。
+        scan_raw = self.scan_points[coord]
+        self.target_scan = self.resolve_point(scan_raw)
+
+        # 动态生成进扫码点前的 safe 点。
+        # 该点与 target_scan 只有 y 不同，用于保证 safe -> scan 只做 y 方向移动。
+        pre_scan_safe_raw = self.make_pre_scan_safe_point(scan_raw)
 
         route_to_raw = self.routes_to_face.get(face, [])
         route_from_raw = self.routes_from_face.get(face, [])
@@ -599,7 +627,11 @@ class Task2FSM:
             rospy.logwarn("TASK2 routes_from_face[%s] not found in task2_routes", face)
             return False
 
+        # 先跑该面的通用安全路线，再追加动态 safe 点。
+        # 追加后的最后一个 safe 点与目标 scan 点 x/z/yaw 完全一致，只有 y 不同。
         self.target_route_to_face = [self.resolve_point(p) for p in route_to_raw]
+        self.target_route_to_face.append(self.resolve_point(pre_scan_safe_raw))
+
         self.target_route_from_face = [self.resolve_point(p) for p in route_from_raw]
         self.route_index = 0
 
