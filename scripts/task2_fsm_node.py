@@ -268,8 +268,10 @@ class Task2FSM:
             self.land_request_last_pub = rospy.Time(0)
             self.land_status = "IDLE"
 
-        # 扫码相关状态才打开视觉；飞行、停稳、降落、急停都关闭视觉。
-        if new_state in ["SCAN_TARGET_ID", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "VERIFY_TARGET"]:
+        # ====================【修改 2026-05-04】扫码相关状态才打开视觉 ====================
+        # HOVER_BEFORE_SCAN 也打开视觉：让 RealSense/双目相机提前开始取图并保存使能快照。
+        # 本状态不使用二维码结果，进入 SEARCH_QR 前会清空旧 qr，避免提前识别误触发。
+        if new_state in ["SCAN_TARGET_ID", "HOVER_BEFORE_SCAN", "SEARCH_QR", "ALIGN_QR", "LASER_FLASH", "VERIFY_TARGET"]:
             self.set_vision(True)
         else:
             self.set_vision(False)
@@ -872,7 +874,11 @@ class Task2FSM:
             self.loop_rate.sleep()
 
     def state_idle(self):
-        self.set_vision(False)
+        # ====================【修改 2026-05-04】IDLE 不再循环发布 /vision/enable=False ====================
+        # 任务1运行时，任务2 FSM 通常仍停在 IDLE。
+        # 旧代码会在 IDLE 里 30Hz 发布 False，把任务1 SEARCH_QR/HOVER_BEFORE_SCAN 发出的 True 抢掉，
+        # 这就是实飞时视觉队友看到“没有收到使能、相机不拍照”的主要原因。
+        # 进入 IDLE 的状态切换处已经会发布一次 False，这里不要持续抢占视觉话题。
         self.laser_off()
         self.stop_motion()
 
@@ -967,7 +973,10 @@ class Task2FSM:
             self.goto_target(self.target_scan)
 
     def state_hover_before_scan(self):
-        self.set_vision(False)
+        # ====================【修改 2026-05-04】停稳阶段也打开视觉使能 ====================
+        # 这里打开视觉只是让相机开始取图/保存快照；本状态不判断 fresh_qr_found()。
+        # 进入 SEARCH_QR 前会清空 qr 缓存，所以不会因为提前识别而误触发。
+        self.set_vision(True)
         self.hold_scan_position()  # 扫码前停稳阶段持续锁定目标 x/y/z/yaw
         elapsed = self.state_elapsed()
 
@@ -1106,7 +1115,9 @@ class Task2FSM:
 
     def state_finish(self):
         self.scan_hold_target = None
-        self.set_vision(False)
+        # ====================【修改 2026-05-04】不要在 FINISH 中循环发布 /vision/enable=False ====================
+        # 进入 FINISH 时 set_state() 已经发布过一次 False。
+        # 如果这里继续 30Hz 发布 False，后续启动任务1时会把任务1的视觉 True 抢掉。
         self.laser_off()
         self.stop_motion()
 
