@@ -171,6 +171,32 @@ class Requirement1FSM:
         ) # 判定偏航角速度已停稳的阈值，单位 rad/s
         # =================================================================================
 
+        # ====================【锁点悬停 2026-05-04】扫描阶段锁定任务坐标系目标 ====================
+        # 说明：
+        #   scan 点到达后，不再只发 0 速度，而是持续锁定该 scan 航点的 x/y/z/yaw。
+        #   这里的 x/y/z/yaw 来自 YAML 相对坐标 resolve_point() 后的任务目标，
+        #   不是某一瞬间的飞机实际位姿，所以不会把“还没停稳/已经偏航”的姿态固化下来。
+        self.scan_hold_kp_xy = float(self.mission.get("scan_hold_kp_xy", 0.35))
+        self.scan_hold_kp_z = float(self.mission.get("scan_hold_kp_z", 0.45))
+        self.scan_hold_kp_yaw = float(self.mission.get("scan_hold_kp_yaw", 0.80))
+
+        self.scan_hold_max_vel_xy = float(self.mission.get("scan_hold_max_vel_xy", 0.08))
+        self.scan_hold_max_vel_z = float(self.mission.get("scan_hold_max_vel_z", 0.06))
+        self.scan_hold_max_yaw_rate = float(self.mission.get("scan_hold_max_yaw_rate", 0.30))
+
+        self.scan_hold_deadband_xy = float(self.mission.get("scan_hold_deadband_xy", 0.025))
+        self.scan_hold_deadband_z = float(self.mission.get("scan_hold_deadband_z", 0.025))
+        self.scan_hold_deadband_yaw = math.radians(
+            float(self.mission.get("scan_hold_deadband_yaw_deg", 2.0))
+        )
+
+        # mission：激光/结果阶段继续锁 YAML 航点；
+        # aligned_xyz：二维码对准成功后，锁当前 x/y/z，但 yaw 仍锁 YAML 航向。
+        self.scan_lock_after_align_mode = str(
+            self.mission.get("scan_lock_after_align_mode", "mission")
+        )
+        # =================================================================================
+
         # ====================【新增】正常任务结束降落参数 ====================
         # land_finish_timeout：FSM 在 LAND 状态等待 bridge 完成 AUTO.LAND + DISARM 的最长时间。
         # 注意：超时后这里不会强行 FINISH，只会周期性报警；真机上不应绕过上锁确认。
@@ -318,6 +344,13 @@ class Requirement1FSM:
 
         self.current_index = 0       # 当前执行的航点序号
         self.current_scan_point = None # 当前扫码点信息
+
+        # ====================【锁点悬停 2026-05-04】当前扫描阶段锁定目标 ====================
+        # scan_hold_target 保存的是 resolve_point(raw_point) 后的任务目标，
+        # 也就是 home_x/home_y/home_z 加上 YAML 相对坐标后的 x/y/z/yaw。
+        # 它不是当前实际位姿，因此不会因为飞机尚未停稳或 yaw 已经偏了而保存错误方向。
+        self.scan_hold_target = None
+        # =================================================================================
 
         self.qr = {
             "found": False,
@@ -488,6 +521,7 @@ class Requirement1FSM:
         self.stop_requested = False
         self.current_index = 0
         self.current_scan_point = None
+        self.scan_hold_target = None
         self.last_ack_id = None
         self.last_sent_goods_id = None
         self.result_sent = False
@@ -829,6 +863,97 @@ class Requirement1FSM:
             abs(self.yaw_rate) < self.settle_yaw_rate_eps
         )
 
+    def compute_scan_hold_cmd(self, target):
+        """根据任务坐标系锁定目标，计算扫描阶段的 xyz/yaw 纠偏速度。"""
+
+        cmd = Twist()
+
+        if target is None:  # 没有锁定目标时，不输出纠偏速度
+            return cmd
+
+        ex = float(target["x"]) - self.x
+        ey = float(target["y"]) - self.y
+        ez = float(target["z"]) - self.z
+        eyaw = normalize_angle(float(target["yaw"]) - self.yaw)
+
+        horizontal_error = math.sqrt(ex * ex + ey * ey)
+
+        if horizontal_error > self.scan_hold_deadband_xy:  # 水平偏离超过死区时，拉回任务航点
+            xy_speed = min(
+                self.scan_hold_max_vel_xy,
+                self.scan_hold_kp_xy * horizontal_error
+            )
+            cmd.linear.x = xy_speed * ex / horizontal_error
+            cmd.linear.y = xy_speed * ey / horizontal_error
+
+        if abs(ez) > self.scan_hold_deadband_z:  # 高度偏离超过死区时，拉回任务高度
+            cmd.linear.z = clamp(
+                self.scan_hold_kp_z * ez,
+                -self.scan_hold_max_vel_z,
+                self.scan_hold_max_vel_z
+            )
+
+        if abs(eyaw) > self.scan_hold_deadband_yaw:  # yaw 偏离超过死区时，拉回任务航向角
+            cmd.angular.z = clamp(
+                self.scan_hold_kp_yaw * eyaw,
+                -self.scan_hold_max_yaw_rate,
+                self.scan_hold_max_yaw_rate
+            )
+
+        return cmd
+
+    def limit_scan_cmd(self, cmd, max_xy=None, max_z=None, max_yaw=None):
+        """限制扫描阶段纠偏速度，避免锁点和视觉微调叠加后过猛。"""
+
+        if max_xy is None:
+            max_xy = self.scan_hold_max_vel_xy
+
+        if max_z is None:
+            max_z = self.scan_hold_max_vel_z
+
+        if max_yaw is None:
+            max_yaw = self.scan_hold_max_yaw_rate
+
+        xy_speed = math.sqrt(cmd.linear.x * cmd.linear.x + cmd.linear.y * cmd.linear.y)
+        if xy_speed > max_xy and xy_speed > 1e-6:  # 水平合速度超限时等比例缩小
+            scale = max_xy / xy_speed
+            cmd.linear.x *= scale
+            cmd.linear.y *= scale
+
+        cmd.linear.z = clamp(cmd.linear.z, -max_z, max_z)
+        cmd.angular.z = clamp(cmd.angular.z, -max_yaw, max_yaw)
+
+        return cmd
+
+    def hold_scan_position(self):
+        """扫描、激光、发结果期间持续锁定任务坐标系 x/y/z/yaw。"""
+
+        if self.scan_hold_target is None:  # 非扫描状态下退化为平滑刹车
+            self.brake_motion()
+            return
+
+        cmd = self.compute_scan_hold_cmd(self.scan_hold_target)
+        cmd = self.limit_scan_cmd(cmd)
+        self.publish_smooth_cmd(cmd)
+
+    def maybe_lock_aligned_xyz_keep_mission_yaw(self):
+        """可选：对准成功后锁当前 x/y/z，但 yaw 仍保持 YAML 任务航向。"""
+
+        if self.scan_hold_target is None:
+            return
+
+        if self.scan_lock_after_align_mode != "aligned_xyz":
+            return
+
+        mission_yaw = float(self.scan_hold_target["yaw"])
+        self.scan_hold_target = {
+            "type": "hold",
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "yaw": mission_yaw
+        }
+
     def publish_body_velocity(self, vx_body, vy_body, vz, yaw_rate):
         """将机体系速度转换到 local 坐标后发布。"""
 
@@ -897,7 +1022,7 @@ class Requirement1FSM:
         )
 
     def visual_align(self):
-        """根据二维码像素误差进行视觉微调。"""
+        """根据二维码像素误差微调，同时继续锁定任务 yaw，避免扫码时原地转。"""
 
         err_u = self.qr["u"] - self.laser_u
         err_v = self.qr["v"] - self.laser_v
@@ -908,12 +1033,25 @@ class Requirement1FSM:
         vy_body = clamp(vy_body, -self.max_align_vel_y, self.max_align_vel_y)
         vz = clamp(vz, -self.max_align_vel_z, self.max_align_vel_z)
 
-        self.publish_body_velocity(
-            vx_body=0.0,
-            vy_body=vy_body,
-            vz=vz,
-            yaw_rate=0.0
+        # 基础锁点命令负责把位置和 yaw 拉回任务坐标系目标。
+        # 这样视觉对准阶段即使二维码像素有抖动，也不会放任机体原地偏航。
+        cmd = self.compute_scan_hold_cmd(self.scan_hold_target)
+
+        # 视觉对准允许在机体系横向和高度方向做小幅修正。
+        # 如果希望完全固定 YAML 的 x/y/z/yaw，可以把 align_kp_u/align_kp_v 设为 0。
+        c = math.cos(self.yaw)
+        s = math.sin(self.yaw)
+        cmd.linear.x += -s * vy_body
+        cmd.linear.y += c * vy_body
+        cmd.linear.z += vz
+
+        cmd = self.limit_scan_cmd(
+            cmd,
+            max_xy=max(self.scan_hold_max_vel_xy, self.max_align_vel_y),
+            max_z=max(self.scan_hold_max_vel_z, self.max_align_vel_z),
+            max_yaw=self.scan_hold_max_yaw_rate
         )
+        self.publish_smooth_cmd(cmd)
 
     def small_search_motion(self):
         """二维码搜索动作已取消。
@@ -921,7 +1059,7 @@ class Requirement1FSM:
         保留这个函数名是为了兼容旧代码，但现在不会再发布横移/升降速度。
         真二维码稳定接入前，扫描点只悬停，不主动找码。
         """
-        self.brake_motion()
+        self.hold_scan_position()
 
     def publish_inventory_result(self, status):
         """发布当前扫码点的盘点结果。"""
@@ -1079,6 +1217,9 @@ class Requirement1FSM:
 
         if point_type == "scan":  # 扫码点到达后先停稳，再开始搜索二维码
             self.current_scan_point = raw_point
+            # 这里锁的是任务坐标系下的目标 x/y/z/yaw，不是当前实际位姿。
+            # 因此即使飞机刚进入误差圈还没完全停稳，也不会把偏掉的位置/航向保存下来。
+            self.scan_hold_target = target
             self.set_state("HOVER_BEFORE_SCAN")
             return
 
@@ -1090,7 +1231,7 @@ class Requirement1FSM:
         """HOVER_BEFORE_SCAN：进入扫码点后先纯悬停，等机体真的停稳再打开视觉。"""
 
         self.set_vision(False)   # 停稳阶段不识别，避免视觉结果提前触发对准动作
-        self.brake_motion()      # 只发平滑零速度，不做小搜索、不做视觉对准
+        self.hold_scan_position() # 持续锁定任务 x/y/z/yaw，而不是只发 0 速度
 
         elapsed = self.state_elapsed()
 
@@ -1130,7 +1271,7 @@ class Requirement1FSM:
         #   新版是进入 SEARCH_QR 后立刻允许识别，识别到就进入 ALIGN_QR，
         #   没识别到则原地等待 search_timeout，不再横移/上下搜索。
         self.set_vision(True)
-        self.brake_motion()
+        self.hold_scan_position()
 
         if self.fresh_qr_found():  # 一旦识别到新鲜二维码，进入对准/点亮流程
             self.stop_motion()
@@ -1170,23 +1311,35 @@ class Requirement1FSM:
             return
 
         if self.qr_aligned():  # 对准后点亮激光
+            self.maybe_lock_aligned_xyz_keep_mission_yaw()
             self.stop_motion()
             self.set_state("LASER_FLASH")
             return
 
-        if self.state_elapsed() > self.align_timeout:  # 对准超时则记录失败
-            rospy.logwarn("QR align timeout.")
+        if self.state_elapsed() > self.align_timeout:  # 对准超时：二维码已识别，仍然点亮激光并上传结果
+            # ====================【修改 2026-05-04】对齐失败不再丢弃扫码结果 ====================
+            # 逻辑说明：
+            #   能进入 ALIGN_QR，说明 SEARCH_QR 阶段已经读到了二维码编号；
+            #   对齐超时只代表激光点没有完全对到二维码中心，不能代表二维码识别失败。
+            #   按当前比赛展示需求：即使对齐失败，也要点亮激光，并把已识别到的二维码编号上传地面站。
+            # 后续流程：
+            #   LASER_FLASH 会打开 /laser/cmd；
+            #   SEND_RESULT 会 publish_inventory_result(status="OK")，地面站收到 SCAN:faceSlot:id。
+            rospy.logwarn(
+                "QR align timeout, but QR id=%d has been detected. Flash laser and send scan result.",
+                int(self.qr["id"])
+            )
             self.stop_motion()
-            self.publish_inventory_result(status="FAIL")
-            self.set_state("NEXT_POINT")
+            self.set_state("LASER_FLASH")
             return
+            # ===========================================================================
 
         self.visual_align()
 
     def state_laser_flash(self):
         """LASER_FLASH：激光点亮一段时间。"""
 
-        self.stop_motion()
+        self.hold_scan_position()  # 激光照射期间继续锁定任务 x/y/z/yaw
 
         if not self.laser_started:  # 第一次进入时打开激光并重新计时
             self.laser_started = True
@@ -1200,6 +1353,8 @@ class Requirement1FSM:
 
     def state_send_result(self):
         """SEND_RESULT：发布盘点结果。"""
+
+        self.hold_scan_position()  # 等待 ACK 时继续锁定任务 x/y/z/yaw
 
         if not self.result_sent:  # 只发送一次结果
             self.publish_inventory_result(status="OK")
@@ -1219,6 +1374,7 @@ class Requirement1FSM:
 
         self.current_index += 1
         self.current_scan_point = None
+        self.scan_hold_target = None
 
         self.set_state("GOTO_MISSION_POINT")
 
